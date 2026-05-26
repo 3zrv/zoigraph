@@ -2,6 +2,7 @@
 #include <raymath.h>
 
 #include <imgui.h>
+#include <imgui_stdlib.h>
 #include <rlImGui.h>
 
 #include <algorithm>
@@ -279,7 +280,7 @@ int main() {
 
         rlImGuiBegin();
         ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(280, 180), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(360, 540), ImGuiCond_FirstUseEver);
         ImGui::Begin("// INSPECTOR //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
@@ -287,11 +288,27 @@ int main() {
         ImGui::Text("edges   %d", static_cast<int>(edges.size()));
         ImGui::Text("fps     %d", GetFPS());
         ImGui::Separator();
-        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
+        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()
+            && static_cast<std::size_t>(selected_node) < stored_nodes.size()) {
             const Vector3 p = positions[selected_node];
-            ImGui::Text("selected node %d", selected_node);
-            ImGui::Text("  pos %+6.1f %+6.1f %+6.1f", p.x, p.y, p.z);
-            if (ImGui::SmallButton("clear##sel")) selected_node = -1;
+            ImGui::Text("node %d   pos %+6.1f %+6.1f %+6.1f", selected_node, p.x, p.y, p.z);
+            ImGui::Spacing();
+
+            auto& sn = stored_nodes[selected_node];
+            ImGui::InputText("title", &sn.title);
+            ImGui::TextDisabled("content (markdown)");
+            ImGui::InputTextMultiline("##content", &sn.content,
+                                      ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
+
+            if (ImGui::Button("save to disk")) {
+                for (std::size_t i = 0;
+                     i < positions.size() && i < stored_nodes.size(); ++i) {
+                    stored_nodes[i].position = positions[i];
+                }
+                db.save_graph(stored_nodes, edges);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("deselect")) selected_node = -1;
         } else {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");

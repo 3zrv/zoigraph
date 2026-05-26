@@ -42,8 +42,12 @@ add_library(imgui STATIC
     ${imgui_src_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_src_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_src_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_src_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
 )
-target_include_directories(imgui PUBLIC ${imgui_src_SOURCE_DIR})
+target_include_directories(imgui PUBLIC
+    ${imgui_src_SOURCE_DIR}
+    ${imgui_src_SOURCE_DIR}/misc/cpp
+)
 
 # ---- rlImGui (raylib ImGui backend) ----------------------------------------
 FetchContent_Declare(
