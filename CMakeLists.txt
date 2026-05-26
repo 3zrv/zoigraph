@@ -118,6 +118,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_physics
     zg_graph
     zg_physics_thread
+    zg_persistence
     raylib
     rlimgui
     imgui

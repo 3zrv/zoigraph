@@ -10,6 +10,7 @@
 
 #include "graph/graph_buffer.h"
 #include "graph/types.h"
+#include "persistence/db.h"
 #include "physics/physics_thread.h"
 
 namespace {
@@ -135,10 +136,30 @@ int main() {
     node_material.shader = instancing_shader;
     node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
+    // Persistence: hydrate the graph from disk if a previous run saved one;
+    // otherwise generate a fresh random layout. Node id == array index for
+    // now — when deletion lands we'll need an id-to-index remap on load.
+    zg::persistence::Database db("zoigraph.db");
+    std::vector<zg::persistence::StoredNode> stored_nodes;
+    std::vector<zg::graph::Edge>             initial_edges;
+    std::vector<Vector3>                     initial_positions;
+
+    if (db.load_graph(stored_nodes, initial_edges)) {
+        initial_positions.reserve(stored_nodes.size());
+        for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
+    } else {
+        initial_positions = make_initial_positions(kNodeCount);
+        initial_edges     = make_random_edges(kNodeCount, kEdgeCount);
+        stored_nodes.reserve(initial_positions.size());
+        for (std::size_t i = 0; i < initial_positions.size(); ++i) {
+            stored_nodes.push_back({static_cast<long long>(i), initial_positions[i], "", ""});
+        }
+    }
+
     zg::graph::GraphBuffer buffer;
     zg::physics::PhysicsThread physics(
-        make_initial_positions(kNodeCount),
-        make_random_edges(kNodeCount, kEdgeCount),
+        std::move(initial_positions),
+        initial_edges,
         buffer);
     physics.start();
 
@@ -224,6 +245,19 @@ int main() {
     }
 
     physics.stop();
+
+    // Persist the converged layout. Titles and content carry through from the
+    // last load (or are empty on first run until the markdown editor lands).
+    std::vector<Vector3>         final_positions;
+    std::vector<zg::graph::Edge> final_edges;
+    buffer.snapshot(final_positions, final_edges);
+    stored_nodes.resize(final_positions.size());
+    for (std::size_t i = 0; i < final_positions.size(); ++i) {
+        stored_nodes[i].id       = static_cast<long long>(i);
+        stored_nodes[i].position = final_positions[i];
+    }
+    db.save_graph(stored_nodes, final_edges);
+
     UnloadMesh(node_mesh);
     UnloadShader(instancing_shader);
     rlImGuiShutdown();
