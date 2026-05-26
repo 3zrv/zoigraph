@@ -147,9 +147,28 @@ int main() {
     std::vector<Matrix>          transforms;
     transforms.reserve(kNodeCount);
 
+    int selected_node = -1;
+
     while (!WindowShouldClose()) {
         UpdateCamera(&camera, CAMERA_ORBITAL);
         buffer.snapshot(positions, edges);
+
+        // Raypick on left-click, but only when ImGui isn't already eating the
+        // mouse. Uses last frame's WantCaptureMouse, which is fine — the panel
+        // is opaque enough that the lag is invisible.
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
+            const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera);
+            float best_dist = 0.0f;
+            int   best_idx  = -1;
+            for (std::size_t i = 0; i < positions.size(); ++i) {
+                const RayCollision hit = GetRayCollisionSphere(ray, positions[i], kNodeRadius);
+                if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {
+                    best_dist = hit.distance;
+                    best_idx  = static_cast<int>(i);
+                }
+            }
+            selected_node = best_idx;
+        }
 
         transforms.clear();
         for (const auto& p : positions) {
@@ -173,6 +192,10 @@ int main() {
                 DrawLine3D(positions[e.source], positions[e.target], MAROON);
             }
         }
+
+        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
+            DrawSphereWires(positions[selected_node], kNodeRadius * 1.6f, 10, 10, YELLOW);
+        }
         EndMode3D();
 
         rlImGuiBegin();
@@ -185,7 +208,15 @@ int main() {
         ImGui::Text("edges   %d", static_cast<int>(edges.size()));
         ImGui::Text("fps     %d", GetFPS());
         ImGui::Separator();
-        ImGui::TextDisabled("selected: (none)");
+        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
+            const Vector3 p = positions[selected_node];
+            ImGui::Text("selected node %d", selected_node);
+            ImGui::Text("  pos %+6.1f %+6.1f %+6.1f", p.x, p.y, p.z);
+            if (ImGui::SmallButton("clear##sel")) selected_node = -1;
+        } else {
+            ImGui::TextDisabled("selected: (none)");
+            ImGui::TextDisabled("(left-click a node)");
+        }
         ImGui::End();
         rlImGuiEnd();
 
