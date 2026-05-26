@@ -1,6 +1,9 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#include <imgui.h>
+#include <rlImGui.h>
+
 #include <cstddef>
 #include <random>
 #include <vector>
@@ -79,6 +82,30 @@ std::vector<zg::graph::Edge> make_random_edges(int node_count, int edge_count) {
     return out;
 }
 
+void apply_terminal_theme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding    = 0.0f;
+    style.FrameRounding     = 0.0f;
+    style.ScrollbarRounding = 0.0f;
+    style.WindowBorderSize  = 1.0f;
+    style.FrameBorderSize   = 1.0f;
+    style.WindowPadding     = ImVec2(8, 8);
+    style.ItemSpacing       = ImVec2(6, 4);
+
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_WindowBg]       = ImVec4(0.03f, 0.03f, 0.03f, 0.94f);
+    c[ImGuiCol_Border]         = ImVec4(0.55f, 0.02f, 0.02f, 0.65f);
+    c[ImGuiCol_TitleBg]        = ImVec4(0.10f, 0.00f, 0.00f, 1.00f);
+    c[ImGuiCol_TitleBgActive]  = ImVec4(0.30f, 0.00f, 0.00f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.05f, 0.00f, 0.00f, 1.00f);
+    c[ImGuiCol_Text]           = ImVec4(0.95f, 0.25f, 0.25f, 1.00f);
+    c[ImGuiCol_TextDisabled]   = ImVec4(0.45f, 0.10f, 0.10f, 1.00f);
+    c[ImGuiCol_Separator]      = ImVec4(0.40f, 0.00f, 0.00f, 0.55f);
+    c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.00f, 0.00f, 0.80f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.00f, 0.00f, 0.80f);
+    c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
+}
+
 }  // namespace
 
 int main() {
@@ -88,6 +115,9 @@ int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(kWidth, kHeight, "zoigraph");
     SetTargetFPS(144);
+
+    rlImGuiSetup(true);
+    apply_terminal_theme();
 
     Camera3D camera{};
     camera.position   = {60.0f, 60.0f, 60.0f};
@@ -145,11 +175,19 @@ int main() {
         }
         EndMode3D();
 
-        DrawText("zoigraph :: scaffold", 16, 16, 20, RED);
-        DrawText(TextFormat("nodes %d  edges %d", static_cast<int>(positions.size()),
-                            static_cast<int>(edges.size())),
-                 16, 40, 16, GRAY);
-        DrawFPS(16, GetScreenHeight() - 28);
+        rlImGuiBegin();
+        ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(280, 180), ImGuiCond_FirstUseEver);
+        ImGui::Begin("// INSPECTOR //");
+        ImGui::Text("zoigraph :: 0.0.0");
+        ImGui::Separator();
+        ImGui::Text("nodes   %d", static_cast<int>(positions.size()));
+        ImGui::Text("edges   %d", static_cast<int>(edges.size()));
+        ImGui::Text("fps     %d", GetFPS());
+        ImGui::Separator();
+        ImGui::TextDisabled("selected: (none)");
+        ImGui::End();
+        rlImGuiEnd();
 
         EndDrawing();
     }
@@ -157,6 +195,7 @@ int main() {
     physics.stop();
     UnloadMesh(node_mesh);
     UnloadShader(instancing_shader);
+    rlImGuiShutdown();
     CloseWindow();
     return 0;
 }
