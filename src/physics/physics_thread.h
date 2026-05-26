@@ -24,6 +24,8 @@ struct SimParams {
     float dt                  = 0.05f;
     float max_speed           = 20.0f;   // velocity clamp to prevent blow-up
     int   target_hz           = 120;     // physics tick rate
+    bool  use_barnes_hut      = true;    // O(N log N) octree approximation for the Coulomb pass
+    float bh_theta            = 0.7f;    // Barnes-Hut opening angle
 };
 
 // One step of the force-directed integration: sum pairwise Coulomb + per-edge
@@ -63,6 +65,11 @@ public:
     // running physics loop. The node starts at `position` with zero velocity.
     void enqueue_node(Vector3 position);
 
+    // Toggle Barnes-Hut at runtime. Cheap, lock-free, takes effect on the
+    // next tick. False switches back to the naive O(N^2) Coulomb loop.
+    void set_use_barnes_hut(bool use) { use_barnes_hut_.store(use); }
+    bool use_barnes_hut() const       { return use_barnes_hut_.load(); }
+
 private:
     void run();
     void step();
@@ -75,6 +82,7 @@ private:
     SimParams                     params_;
 
     std::atomic<bool>      running_{false};
+    std::atomic<bool>      use_barnes_hut_;
     std::thread            worker_;
     std::mutex             pending_mu_;
     std::vector<Vector3>   pending_additions_;

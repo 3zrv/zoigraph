@@ -27,3 +27,7 @@ add_test(NAME phantom COMMAND test_phantom)
 add_executable(test_integrator test_integrator.cpp)
 target_link_libraries(test_integrator PRIVATE zg_physics_thread doctest::doctest)
 add_test(NAME integrator COMMAND test_integrator)
+
+add_executable(test_barnes_hut test_barnes_hut.cpp)
+target_link_libraries(test_barnes_hut PRIVATE zg_physics doctest::doctest)
+add_test(NAME barnes_hut COMMAND test_barnes_hut)

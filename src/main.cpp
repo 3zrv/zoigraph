@@ -630,6 +630,10 @@ int main() {
         ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
         ImGui::Checkbox("CRT post-process", &post_process);
+        bool bh = physics.use_barnes_hut();
+        if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
+            physics.set_use_barnes_hut(bh);
+        }
         ImGui::Separator();
         ImGui::TextDisabled("LEFT-CLICK         select node");
         ImGui::TextDisabled("RIGHT-DRAG         orbit");

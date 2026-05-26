@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 
+#include "physics/barnes_hut.h"
 #include "physics/forces.h"
 #include "telemetry/phantom.h"
 
@@ -21,7 +22,8 @@ PhysicsThread::PhysicsThread(std::vector<Vector3> initial_positions,
       edges_(std::move(edges)),
       buffer_(buffer),
       phantom_buffer_(phantom_buffer),
-      params_(params) {
+      params_(params),
+      use_barnes_hut_(params.use_barnes_hut) {
     buffer_.set_edges(edges_);
     buffer_.publish_positions(positions_);
 }
@@ -67,12 +69,19 @@ void integrate_step(std::vector<Vector3>& positions,
     const std::size_t n = positions.size();
     std::vector<Vector3> forces(n, Vector3{0.0f, 0.0f, 0.0f});
 
-    // Pairwise Coulomb repulsion (O(N^2) — naive; Barnes-Hut comes later).
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = i + 1; j < n; ++j) {
-            const Vector3 f = coulomb_force(positions[i], positions[j], 1.0f, 1.0f, params.repulsion_k);
-            forces[i].x += f.x; forces[i].y += f.y; forces[i].z += f.z;
-            forces[j].x -= f.x; forces[j].y -= f.y; forces[j].z -= f.z;
+    if (params.use_barnes_hut) {
+        // Tree-accelerated O(N log N) Coulomb pass.
+        apply_barnes_hut_repulsion(positions, forces, params.repulsion_k, params.bh_theta);
+    } else {
+        // Naive O(N^2) pairwise — preserved for the off-toggle path and for
+        // small-N tests where the constant factor of building a tree isn't
+        // worth it.
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = i + 1; j < n; ++j) {
+                const Vector3 f = coulomb_force(positions[i], positions[j], 1.0f, 1.0f, params.repulsion_k);
+                forces[i].x += f.x; forces[i].y += f.y; forces[i].z += f.z;
+                forces[j].x -= f.x; forces[j].y -= f.y; forces[j].z -= f.z;
+            }
         }
     }
 
@@ -147,7 +156,12 @@ void PhysicsThread::step() {
         phantom_positions.reserve(phantoms.size());
         for (const auto& p : phantoms) phantom_positions.push_back(p.position);
     }
-    integrate_step(positions_, velocities_, edges_, params_, phantom_positions);
+
+    // Pull the runtime toggle through to SimParams so the integrator picks
+    // up the latest setting without a restart.
+    SimParams effective    = params_;
+    effective.use_barnes_hut = use_barnes_hut_.load();
+    integrate_step(positions_, velocities_, edges_, effective, phantom_positions);
 }
 
 }  // namespace zg::physics

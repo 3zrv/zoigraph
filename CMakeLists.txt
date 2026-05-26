@@ -94,7 +94,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(doctest)
 
 # ---- physics (pure functions, separately testable) -------------------------
-add_library(zg_physics STATIC src/physics/forces.cpp)
+add_library(zg_physics STATIC
+    src/physics/forces.cpp
+    src/physics/barnes_hut.cpp
+)
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
