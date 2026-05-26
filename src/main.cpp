@@ -112,16 +112,29 @@ void apply_terminal_theme() {
 constexpr Vector3 kCameraDefaultPos    = {60.0f, 60.0f, 60.0f};
 constexpr Vector3 kCameraDefaultTarget = {0.0f, 0.0f, 0.0f};
 
-// Custom orbit camera: right-drag rotates around the target, middle-drag pans
-// the target, scroll dollies, R resets. Gated against ImGui mouse-capture so
+// Custom orbit camera: right-drag rotates around the target, Shift+right-drag
+// pans, scroll dollies, R resets. Gated against ImGui mouse-capture so
 // dragging on the inspector doesn't reach through to the 3D layer.
 void update_orbit_camera(Camera3D& camera) {
     const bool ui_has_mouse = ImGui::GetIO().WantCaptureMouse;
     const Vector2 dm        = GetMouseDelta();
     const float wheel       = GetMouseWheelMove();
+    const bool shift_down   = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
     if (!ui_has_mouse) {
-        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && (dm.x != 0.0f || dm.y != 0.0f)) {
+        const bool dragging = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+                              (dm.x != 0.0f || dm.y != 0.0f);
+
+        if (dragging && shift_down) {
+            const Vector3 offset = Vector3Subtract(camera.position, camera.target);
+            const Vector3 right  = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
+            const Vector3 up     = Vector3Normalize(Vector3CrossProduct(Vector3Negate(offset), right));
+            const float scale    = Vector3Length(offset) * 0.0015f;
+            const Vector3 pan    = Vector3Add(Vector3Scale(right, -dm.x * scale),
+                                              Vector3Scale(up,    dm.y * scale));
+            camera.position = Vector3Add(camera.position, pan);
+            camera.target   = Vector3Add(camera.target,   pan);
+        } else if (dragging) {
             Vector3 offset = Vector3Subtract(camera.position, camera.target);
 
             // Yaw around the world up axis.
@@ -135,17 +148,6 @@ void update_orbit_camera(Camera3D& camera) {
                 offset = pitched;
             }
             camera.position = Vector3Add(camera.target, offset);
-        }
-
-        if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) && (dm.x != 0.0f || dm.y != 0.0f)) {
-            const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-            const Vector3 right  = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
-            const Vector3 up     = Vector3Normalize(Vector3CrossProduct(Vector3Negate(offset), right));
-            const float scale    = Vector3Length(offset) * 0.0015f;
-            const Vector3 pan    = Vector3Add(Vector3Scale(right, -dm.x * scale),
-                                              Vector3Scale(up,    dm.y * scale));
-            camera.position = Vector3Add(camera.position, pan);
-            camera.target   = Vector3Add(camera.target,   pan);
         }
 
         if (wheel != 0.0f) {
@@ -295,11 +297,11 @@ int main() {
             ImGui::TextDisabled("(left-click a node)");
         }
         ImGui::Separator();
-        ImGui::TextDisabled("LEFT-CLICK     select node");
-        ImGui::TextDisabled("RIGHT-DRAG     orbit");
-        ImGui::TextDisabled("MIDDLE-DRAG    pan");
-        ImGui::TextDisabled("SCROLL WHEEL   zoom");
-        ImGui::TextDisabled("R KEY          reset view");
+        ImGui::TextDisabled("LEFT-CLICK         select node");
+        ImGui::TextDisabled("RIGHT-DRAG         orbit");
+        ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
+        ImGui::TextDisabled("SCROLL WHEEL       zoom");
+        ImGui::TextDisabled("R KEY              reset view");
         ImGui::End();
         rlImGuiEnd();
 
