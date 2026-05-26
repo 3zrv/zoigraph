@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "graph/graph_buffer.h"
+#include "graph/picks.h"
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
@@ -171,6 +172,84 @@ struct RabbitHole {
     float                    elapsed = 0.0f;  // seconds into the current segment
     Vector3                  camera_offset{}; // captured at trigger time; preserved across the fly
 };
+
+// ---- Throw-the-bones macro -------------------------------------------------
+// Picks three weakly-connected nodes, smoothly flies the camera to frame all
+// three, and pops an ImGui scratch panel asking the operator what connects
+// them. Forced pattern recognition.
+struct Bones {
+    bool                     active     = false;
+    bool                     panel_open = false;
+    std::vector<std::size_t> chosen;
+    std::string              scratch;
+    float                    elapsed    = 0.0f;
+    float                    duration   = 1.2f;
+    Vector3                  from_target{};
+    Vector3                  to_target{};
+    Vector3                  from_position{};
+    Vector3                  to_position{};
+};
+
+void throw_bones(Bones& b,
+                 const std::vector<Vector3>& positions,
+                 const std::vector<zg::graph::Edge>& edges,
+                 const Camera3D& camera,
+                 std::mt19937& rng) {
+    b.chosen = zg::graph::pick_weakly_connected_triple(positions.size(), edges, rng);
+    if (b.chosen.size() != 3) {
+        b.active = false;
+        b.panel_open = false;
+        return;
+    }
+
+    Vector3 centroid{0, 0, 0};
+    for (auto i : b.chosen) {
+        centroid.x += positions[i].x;
+        centroid.y += positions[i].y;
+        centroid.z += positions[i].z;
+    }
+    centroid.x /= 3.0f; centroid.y /= 3.0f; centroid.z /= 3.0f;
+
+    float spread = 0.0f;
+    for (std::size_t i = 0; i < b.chosen.size(); ++i) {
+        for (std::size_t j = i + 1; j < b.chosen.size(); ++j) {
+            const Vector3 d = Vector3Subtract(positions[b.chosen[i]], positions[b.chosen[j]]);
+            spread = std::max(spread, Vector3Length(d));
+        }
+    }
+
+    // Camera position: back off from the centroid along the current view
+    // direction at a distance proportional to the spread, so all three fit
+    // comfortably in frame.
+    const Vector3 view_offset   = Vector3Subtract(camera.position, camera.target);
+    const float   current_dist  = std::max(0.01f, Vector3Length(view_offset));
+    const Vector3 dir_n         = Vector3Scale(view_offset, 1.0f / current_dist);
+    const float   target_dist   = std::max(20.0f, spread * 2.5f);
+
+    b.from_target   = camera.target;
+    b.to_target     = centroid;
+    b.from_position = camera.position;
+    b.to_position   = Vector3Add(centroid, Vector3Scale(dir_n, target_dist));
+    b.elapsed       = 0.0f;
+    b.active        = true;
+    b.panel_open    = true;
+    b.scratch.clear();
+}
+
+void update_bones(Bones& b, Camera3D& camera, float dt) {
+    if (!b.active) return;
+    b.elapsed += dt;
+    if (b.elapsed >= b.duration) {
+        camera.target   = b.to_target;
+        camera.position = b.to_position;
+        b.active        = false;
+        return;
+    }
+    const float t = b.elapsed / b.duration;
+    const float s = t * t * (3.0f - 2.0f * t);  // smoothstep
+    camera.target   = Vector3Lerp(b.from_target,   b.to_target,   s);
+    camera.position = Vector3Lerp(b.from_position, b.to_position, s);
+}
 
 // Walk `kRabbitHopCount` random connected edges starting at `start`. May
 // terminate early if a node has no neighbors — the macro just animates a
@@ -406,6 +485,7 @@ int main() {
     bool                             show_grid     = true;
     bool                             post_process  = true;
     RabbitHole                       rabbit;
+    Bones                            bones;
     std::mt19937                     rabbit_rng(std::random_device{}());
 
     while (!WindowShouldClose()) {
@@ -416,9 +496,10 @@ int main() {
 
         // H key triggers the Rabbit Hole macro from the currently selected
         // node. Ignored if nothing is selected or a macro is already running.
-        if (IsKeyPressed(KEY_H) && selected_node >= 0
+        const bool typing = ImGui::GetIO().WantTextInput;
+        if (IsKeyPressed(KEY_H) && !typing && selected_node >= 0
             && static_cast<std::size_t>(selected_node) < positions.size()
-            && !rabbit.active) {
+            && !rabbit.active && !bones.active) {
             auto path = pick_rabbit_path(static_cast<std::size_t>(selected_node),
                                           edges, rabbit_rng, positions.size());
             if (path.size() >= 2) {
@@ -430,8 +511,17 @@ int main() {
             }
         }
 
+        // B key throws the bones — three weakly-connected nodes, smooth fly
+        // to frame all three, scratch panel asks what connects them.
+        if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
+            && positions.size() >= 3) {
+            throw_bones(bones, positions, edges, camera, rabbit_rng);
+        }
+
         if (rabbit.active) {
             update_rabbit_hole(rabbit, camera, positions, selected_node, GetFrameTime());
+        } else if (bones.active) {
+            update_bones(bones, camera, GetFrameTime());
         } else {
             update_orbit_camera(camera);
         }
@@ -641,7 +731,33 @@ int main() {
         ImGui::TextDisabled("SCROLL WHEEL       zoom");
         ImGui::TextDisabled("R KEY              reset view");
         ImGui::TextDisabled("H KEY              rabbit hole");
+        ImGui::TextDisabled("B KEY              throw the bones");
         ImGui::End();
+
+        // Bones scratch panel — separate ImGui window, opens when a throw
+        // selects a triple and stays open until the operator closes it.
+        if (bones.panel_open) {
+            ImGui::SetNextWindowPos(ImVec2(420, 16), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(360, 320), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
+                ImGui::TextDisabled("what connects these?");
+                ImGui::Separator();
+                for (auto i : bones.chosen) {
+                    if (i >= stored_nodes.size()) continue;
+                    const auto& sn = stored_nodes[i];
+                    ImGui::Text("[%zu] %s", i,
+                                sn.title.empty() ? "(untitled)" : sn.title.c_str());
+                }
+                ImGui::Separator();
+                ImGui::InputTextMultiline("##bones-scratch", &bones.scratch,
+                                          ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10));
+                if (ImGui::Button("throw again")) {
+                    throw_bones(bones, positions, edges, camera, rabbit_rng);
+                }
+            }
+            ImGui::End();
+        }
+
         rlImGuiEnd();
 
         EndDrawing();

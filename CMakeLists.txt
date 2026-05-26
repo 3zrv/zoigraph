@@ -102,7 +102,10 @@ target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
 # ---- graph (thread-safe buffer between physics and render) -----------------
-add_library(zg_graph STATIC src/graph/graph_buffer.cpp)
+add_library(zg_graph STATIC
+    src/graph/graph_buffer.cpp
+    src/graph/picks.cpp
+)
 target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
 
