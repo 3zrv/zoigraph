@@ -132,6 +132,65 @@ TEST_CASE("parse_phantom: label that isn't a string is silently dropped") {
     CHECK(p->label.empty());
 }
 
+TEST_CASE("phantom_buffer: size is zero before any add") {
+    PhantomBuffer buf;
+    CHECK(buf.size() == 0);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.0);
+    CHECK(out.empty());
+}
+
+TEST_CASE("phantom_buffer: mixed expiry keeps only the in-TTL phantoms") {
+    PhantomBuffer buf;
+    Phantom p1{}; p1.id = 1; p1.spawn_time = 100.0;
+    Phantom p2{}; p2.id = 2; p2.spawn_time =  50.0;
+    Phantom p3{}; p3.id = 3; p3.spawn_time = 105.0;
+    buf.add(p1); buf.add(p2); buf.add(p3);
+    REQUIRE(buf.size() == 3);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, /*ttl=*/60.0f, /*now=*/120.0);
+    // p1: age 20 < 60 -> keep. p2: age 70 > 60 -> expire. p3: age 15 < 60 -> keep.
+    REQUIRE(out.size() == 2);
+    CHECK(buf.size() == 2);
+    const bool has_1 = (out[0].id == 1 || out[1].id == 1);
+    const bool has_3 = (out[0].id == 3 || out[1].id == 3);
+    CHECK(has_1);
+    CHECK(has_3);
+}
+
+TEST_CASE("phantom_buffer: duplicate ids are all retained (no de-duplication)") {
+    PhantomBuffer buf;
+    Phantom p1{}; p1.id = 42; p1.spawn_time = 100.0; p1.position = {1, 0, 0};
+    Phantom p2{}; p2.id = 42; p2.spawn_time = 100.0; p2.position = {2, 0, 0};
+    buf.add(p1);
+    buf.add(p2);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].id == 42);
+    CHECK(out[1].id == 42);
+}
+
+TEST_CASE("phantom_buffer: add after expire restores a populated snapshot") {
+    PhantomBuffer buf;
+    Phantom stale{}; stale.id = 1; stale.spawn_time = 0.0;
+    buf.add(stale);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 1000.0);
+    REQUIRE(out.empty());
+    REQUIRE(buf.size() == 0);
+
+    Phantom fresh{}; fresh.id = 2; fresh.spawn_time = 1000.0;
+    buf.add(fresh);
+    buf.snapshot_and_expire(out, 60.0f, 1000.1);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].id == 2);
+}
+
 TEST_CASE("phantom_buffer: concurrent add/snapshot doesn't crash or corrupt") {
     // Mirrors the graph_buffer producer/consumer hammer: a producer thread
     // continuously adds phantoms while we keep snapshotting on the main

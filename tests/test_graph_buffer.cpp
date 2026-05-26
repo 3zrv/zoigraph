@@ -90,6 +90,50 @@ TEST_CASE("graph_buffer: edges and positions can be set in either order") {
     REQUIRE(edges.size() == 1);
 }
 
+TEST_CASE("graph_buffer: multiple concurrent readers don't crash or deadlock") {
+    // Spin a single producer and several reader threads. Each reader pulls
+    // snapshots in a tight loop; the producer keeps rewriting. Verifies the
+    // mutex doesn't deadlock under read contention and that snapshots stay
+    // internally consistent (all elements equal to the current publish).
+    GraphBuffer buf;
+    std::atomic<bool> stop{false};
+
+    std::thread producer([&]() {
+        const std::vector<Vector3> a(64, Vector3{1, 1, 1});
+        const std::vector<Vector3> b(64, Vector3{2, 2, 2});
+        bool toggle = false;
+        while (!stop.load(std::memory_order_relaxed)) {
+            buf.publish_positions(toggle ? b : a);
+            toggle = !toggle;
+        }
+    });
+
+    const auto reader_body = [&]() {
+        const auto t0 = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(120)) {
+            std::vector<Vector3> positions;
+            std::vector<Edge>    edges;
+            buf.snapshot(positions, edges);
+            if (!positions.empty()) {
+                const float v = positions[0].x;
+                REQUIRE((v == 1.0f || v == 2.0f));
+                for (const auto& p : positions) {
+                    REQUIRE(p.x == v);
+                }
+            }
+        }
+    };
+
+    std::thread r1(reader_body);
+    std::thread r2(reader_body);
+    std::thread r3(reader_body);
+    r1.join();
+    r2.join();
+    r3.join();
+    stop.store(true);
+    producer.join();
+}
+
 TEST_CASE("graph_buffer: producer/consumer hammering doesn't tear a snapshot") {
     // Verifies the mutex actually guards against torn reads: a snapshot must
     // observe either the empty initial state OR a fully-formed vector where

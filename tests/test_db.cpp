@@ -251,6 +251,74 @@ TEST_CASE("db: persistence survives close + reopen against a real file") {
     std::remove((path + "-journal").c_str());
 }
 
+TEST_CASE("db: update_node_text on a non-existent id is a silent no-op") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "real", ""}}, {});
+
+    // Should not throw.
+    db.update_node_text(9999, "ghost", "no row to update");
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].id == 1);
+    CHECK(nodes[0].title == "real");
+    // The ghost write must not have created a phantom FTS row either.
+    CHECK(db.search("ghost").empty());
+}
+
+TEST_CASE("db: update_node_text preserves the row's position fields") {
+    Database db(":memory:");
+    db.save_graph({{1, {1.5f, -2.5f, 7.0f}, "before", "body"}}, {});
+
+    db.update_node_text(1, "after", "new body");
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].title == "after");
+    CHECK(nodes[0].content == "new body");
+    CHECK(nodes[0].position.x == doctest::Approx(1.5f));
+    CHECK(nodes[0].position.y == doctest::Approx(-2.5f));
+    CHECK(nodes[0].position.z == doctest::Approx(7.0f));
+}
+
+TEST_CASE("db: edges referencing non-existent nodes are tolerated (no FK enforced)") {
+    Database db(":memory:");
+    // Foreign keys are not enforced — useful while node ids are still
+    // shuffled around. Edges referencing missing ids should round-trip.
+    db.save_graph({{1, {0,0,0}, "n", ""}}, {{1, 99}, {77, 88}});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes.size() == 1);
+    REQUIRE(edges.size() == 2);
+    CHECK(edges[0].source == 1);
+    CHECK(edges[0].target == 99);
+    CHECK(edges[1].source == 77);
+    CHECK(edges[1].target == 88);
+}
+
+TEST_CASE("db: an 8 KB content blob roundtrips exactly") {
+    Database db(":memory:");
+    std::string big;
+    big.reserve(8192);
+    for (int i = 0; i < 8192; ++i) {
+        big.push_back(static_cast<char>('a' + (i % 26)));
+    }
+    db.save_graph({{1, {0,0,0}, "long-content", big}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].content == big);
+    CHECK(nodes[0].content.size() == 8192);
+}
+
 TEST_CASE("db: load returns nodes ordered by id") {
     Database db(":memory:");
     db.save_graph({
