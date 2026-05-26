@@ -19,6 +19,10 @@ public:
     // doesn't grow unbounded.
     void snapshot_and_expire(std::vector<Phantom>& out, float ttl_seconds, double now);
 
+    // Removes every phantom matching the given id. Used by click-to-pin to
+    // halt decay when a phantom is promoted to a Static Node.
+    void remove(long long id);
+
     std::size_t size() const;
 
 private:

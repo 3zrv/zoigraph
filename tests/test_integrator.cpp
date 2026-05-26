@@ -2,13 +2,18 @@
 #include <doctest/doctest.h>
 
 #include "physics/physics_thread.h"
+#include "graph/graph_buffer.h"
 
+#include <chrono>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 using zg::physics::SimParams;
 using zg::physics::integrate_step;
+using zg::physics::PhysicsThread;
 using zg::graph::Edge;
+using zg::graph::GraphBuffer;
 
 namespace {
 
@@ -262,6 +267,51 @@ TEST_CASE("integrator: centering pulls a uniform cluster toward origin together"
     const float end_centroid = centroid_x();
     CHECK(end_centroid < start_centroid);
     CHECK(std::fabs(end_centroid) < std::fabs(start_centroid));
+}
+
+TEST_CASE("PhysicsThread: enqueue_node is drained on the next tick") {
+    // Click-to-pin path: a phantom promoted to Static Node calls
+    // enqueue_node(position) on the running physics thread, which must
+    // pick it up at the start of the next step. Verifies the queue is
+    // drained and the new node is reflected in the published snapshot.
+    GraphBuffer buffer;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}}, {}, buffer, /*phantom_buffer=*/nullptr);
+    physics.start();
+
+    physics.enqueue_node({5.0f, 5.0f, 5.0f});
+    // The thread ticks at ~120 Hz; 80 ms is many ticks worth of margin.
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    // The new node has had a few ticks of integration but should still be
+    // within striking distance of the original spawn point.
+    CHECK(std::fabs(positions[1].x - 5.0f) < 2.0f);
+    CHECK(std::fabs(positions[1].y - 5.0f) < 2.0f);
+    CHECK(std::fabs(positions[1].z - 5.0f) < 2.0f);
+}
+
+TEST_CASE("PhysicsThread: multiple enqueue_node calls all land") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_node({1, 0, 0});
+    physics.enqueue_node({2, 0, 0});
+    physics.enqueue_node({3, 0, 0});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(positions.size() == 4);
 }
 
 TEST_CASE("integrator: every-coefficient-zero params yields zero motion") {

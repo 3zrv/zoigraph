@@ -3,6 +3,7 @@
 #include <raylib.h>
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -57,6 +58,11 @@ public:
     void start();
     void stop();
 
+    // Queues a new static node to be added to the simulation at the start of
+    // the next tick. Thread-safe — caller need not coordinate with the
+    // running physics loop. The node starts at `position` with zero velocity.
+    void enqueue_node(Vector3 position);
+
 private:
     void run();
     void step();
@@ -68,8 +74,10 @@ private:
     telemetry::PhantomBuffer*     phantom_buffer_;
     SimParams                     params_;
 
-    std::atomic<bool> running_{false};
-    std::thread       worker_;
+    std::atomic<bool>      running_{false};
+    std::thread            worker_;
+    std::mutex             pending_mu_;
+    std::vector<Vector3>   pending_additions_;
 };
 
 }  // namespace zg::physics

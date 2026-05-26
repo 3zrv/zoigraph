@@ -304,20 +304,45 @@ int main() {
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Raypick on left-click, but only when ImGui isn't already eating the
-        // mouse. Uses last frame's WantCaptureMouse, which is fine — the panel
-        // is opaque enough that the lag is invisible.
+        // mouse. Phantoms get first crack since they're bigger and ephemeral;
+        // hitting one promotes it to a Static Node before the static-pick
+        // pass even runs.
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
             const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera);
-            float best_dist = 0.0f;
-            int   best_idx  = -1;
-            for (std::size_t i = 0; i < positions.size(); ++i) {
-                const RayCollision hit = GetRayCollisionSphere(ray, positions[i], kNodeRadius);
-                if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {
-                    best_dist = hit.distance;
-                    best_idx  = static_cast<int>(i);
+
+            int    phantom_hit = -1;
+            float  phantom_dist = 0.0f;
+            for (std::size_t i = 0; i < phantoms.size(); ++i) {
+                const RayCollision hit = GetRayCollisionSphere(ray, phantoms[i].position, kPhantomRadius);
+                if (hit.hit && (phantom_hit < 0 || hit.distance < phantom_dist)) {
+                    phantom_dist = hit.distance;
+                    phantom_hit  = static_cast<int>(i);
                 }
             }
-            selected_node = best_idx;
+
+            if (phantom_hit >= 0) {
+                // Promote: halt decay, append a Static Node carrying the
+                // phantom's label as title, save to disk, queue it into
+                // physics, and select the new node.
+                const auto& ph = phantoms[phantom_hit];
+                const long long new_id = static_cast<long long>(stored_nodes.size());
+                stored_nodes.push_back({new_id, ph.position, ph.label, ""});
+                phantom_buffer.remove(ph.id);
+                db.save_graph(stored_nodes, edges);
+                physics.enqueue_node(ph.position);
+                selected_node = static_cast<int>(new_id);
+            } else {
+                float best_dist = 0.0f;
+                int   best_idx  = -1;
+                for (std::size_t i = 0; i < positions.size(); ++i) {
+                    const RayCollision hit = GetRayCollisionSphere(ray, positions[i], kNodeRadius);
+                    if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {
+                        best_dist = hit.distance;
+                        best_idx  = static_cast<int>(i);
+                    }
+                }
+                selected_node = best_idx;
+            }
         }
 
         transforms.clear();

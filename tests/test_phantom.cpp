@@ -191,6 +191,37 @@ TEST_CASE("phantom_buffer: add after expire restores a populated snapshot") {
     CHECK(out[0].id == 2);
 }
 
+TEST_CASE("phantom_buffer: remove by id drops every matching entry") {
+    PhantomBuffer buf;
+    Phantom a{}; a.id = 1; a.spawn_time = 100.0;
+    Phantom b{}; b.id = 2; b.spawn_time = 100.0;
+    Phantom c{}; c.id = 1; c.spawn_time = 100.0;  // duplicate id with a
+    buf.add(a); buf.add(b); buf.add(c);
+    REQUIRE(buf.size() == 3);
+
+    buf.remove(1);
+    REQUIRE(buf.size() == 1);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].id == 2);
+}
+
+TEST_CASE("phantom_buffer: remove of a non-existent id is a silent no-op") {
+    PhantomBuffer buf;
+    Phantom p{}; p.id = 1; p.spawn_time = 100.0;
+    buf.add(p);
+
+    buf.remove(99);  // never added; should not throw or affect existing rows.
+    CHECK(buf.size() == 1);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].id == 1);
+}
+
 TEST_CASE("phantom_buffer: concurrent add/snapshot doesn't crash or corrupt") {
     // Mirrors the graph_buffer producer/consumer hammer: a producer thread
     // continuously adds phantoms while we keep snapshotting on the main

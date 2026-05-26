@@ -20,6 +20,14 @@ void PhantomBuffer::snapshot_and_expire(std::vector<Phantom>& out,
     out = phantoms_;
 }
 
+void PhantomBuffer::remove(long long id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    phantoms_.erase(
+        std::remove_if(phantoms_.begin(), phantoms_.end(),
+                       [id](const Phantom& p) { return p.id == id; }),
+        phantoms_.end());
+}
+
 std::size_t PhantomBuffer::size() const {
     std::lock_guard<std::mutex> lock(mu_);
     return phantoms_.size();

@@ -40,6 +40,11 @@ void PhysicsThread::stop() {
     if (worker_.joinable()) worker_.join();
 }
 
+void PhysicsThread::enqueue_node(Vector3 position) {
+    std::lock_guard<std::mutex> lock(pending_mu_);
+    pending_additions_.push_back(position);
+}
+
 void PhysicsThread::run() {
     using clock = std::chrono::steady_clock;
     const auto tick = std::chrono::microseconds(1'000'000 / std::max(1, params_.target_hz));
@@ -124,6 +129,17 @@ void integrate_step(std::vector<Vector3>& positions,
 }
 
 void PhysicsThread::step() {
+    // Drain queued node additions before integrating. Each new node enters
+    // at zero velocity; the integrator picks it up on the same tick.
+    {
+        std::lock_guard<std::mutex> lock(pending_mu_);
+        for (const Vector3& pos : pending_additions_) {
+            positions_.push_back(pos);
+            velocities_.push_back({0.0f, 0.0f, 0.0f});
+        }
+        pending_additions_.clear();
+    }
+
     std::vector<Vector3> phantom_positions;
     if (phantom_buffer_) {
         std::vector<telemetry::Phantom> phantoms;
