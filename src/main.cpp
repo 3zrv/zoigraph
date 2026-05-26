@@ -270,15 +270,15 @@ int main() {
         }
     }
 
-    zg::graph::GraphBuffer buffer;
-    zg::physics::PhysicsThread physics(
+    zg::graph::GraphBuffer            buffer;
+    zg::telemetry::PhantomBuffer      phantom_buffer;
+    zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
+    zg::physics::PhysicsThread        physics(
         std::move(initial_positions),
         initial_edges,
-        buffer);
+        buffer,
+        &phantom_buffer);
     physics.start();
-
-    zg::telemetry::PhantomBuffer    phantom_buffer;
-    zg::telemetry::TelemetryThread  telemetry(kTelemetryPort, phantom_buffer);
     telemetry.start();
 
     std::vector<Vector3>         positions;

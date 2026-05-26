@@ -104,9 +104,11 @@ target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
 
 # ---- physics simulation thread ---------------------------------------------
+# Depends on zg_telemetry because the physics step now snapshots PhantomBuffer
+# to apply phantom repulsion against static nodes (directive §5.B).
 add_library(zg_physics_thread STATIC src/physics/physics_thread.cpp)
 target_include_directories(zg_physics_thread PUBLIC src)
-target_link_libraries(zg_physics_thread PUBLIC zg_physics zg_graph raylib)
+target_link_libraries(zg_physics_thread PUBLIC zg_physics zg_graph zg_telemetry raylib)
 if(NOT WIN32)
     target_link_libraries(zg_physics_thread PUBLIC pthread)
 endif()

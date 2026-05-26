@@ -132,6 +132,49 @@ TEST_CASE("integrator: velocity clamp caps speed even under extreme repulsion") 
     }
 }
 
+TEST_CASE("integrator: a phantom shoves a nearby static node away") {
+    // Per directive §5.B, phantoms apply one-way Coulomb repulsion with a
+    // much larger coefficient than static-vs-static. A static node placed
+    // at the origin with a phantom just to its right should drift to the
+    // left over a handful of ticks.
+    std::vector<Vector3> positions  = {{0.0f, 0.0f, 0.0f}};
+    std::vector<Vector3> velocities = {{0.0f, 0.0f, 0.0f}};
+    SimParams params = zero_forces();
+    params.phantom_repulsion_k = 800.0f;
+
+    const std::vector<Vector3> phantoms = {{2.0f, 0.0f, 0.0f}};
+    for (int i = 0; i < 30; ++i) {
+        integrate_step(positions, velocities, {}, params, phantoms);
+    }
+
+    CHECK(positions[0].x < -0.1f);                   // drifted in -x direction
+    CHECK(std::fabs(positions[0].y) < 1e-3f);        // no spurious y motion
+    CHECK(std::fabs(positions[0].z) < 1e-3f);        // no spurious z motion
+}
+
+TEST_CASE("integrator: phantoms do not accumulate reaction forces themselves") {
+    // The vector<Vector3> of phantom positions is by-value into the function;
+    // there's no way for the integrator to modify the caller's phantom list.
+    // Verify by holding a reference to the snapshot the integrator sees and
+    // confirming the static node moves while phantoms are unchanged.
+    std::vector<Vector3> positions  = {{0, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}};
+    SimParams params = zero_forces();
+    params.phantom_repulsion_k = 800.0f;
+
+    std::vector<Vector3> phantoms = {{3.0f, 0.0f, 0.0f}};
+    const Vector3 phantom_before = phantoms[0];
+
+    for (int i = 0; i < 30; ++i) {
+        integrate_step(positions, velocities, {}, params, phantoms);
+    }
+
+    CHECK(phantoms[0].x == phantom_before.x);
+    CHECK(phantoms[0].y == phantom_before.y);
+    CHECK(phantoms[0].z == phantom_before.z);
+    CHECK(positions[0].x < 0.0f);  // static node still moved
+}
+
 TEST_CASE("integrator: zero-velocity node with no forces does not drift") {
     std::vector<Vector3> positions  = {{1.0f, 2.0f, 3.0f}};
     std::vector<Vector3> velocities = {{0, 0, 0}};

@@ -1,21 +1,26 @@
 #include "physics/physics_thread.h"
 
+#include <raylib.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 
 #include "physics/forces.h"
+#include "telemetry/phantom.h"
 
 namespace zg::physics {
 
 PhysicsThread::PhysicsThread(std::vector<Vector3> initial_positions,
                              std::vector<graph::Edge> edges,
                              graph::GraphBuffer& buffer,
+                             telemetry::PhantomBuffer* phantom_buffer,
                              SimParams params)
     : positions_(std::move(initial_positions)),
       velocities_(positions_.size(), Vector3{0.0f, 0.0f, 0.0f}),
       edges_(std::move(edges)),
       buffer_(buffer),
+      phantom_buffer_(phantom_buffer),
       params_(params) {
     buffer_.set_edges(edges_);
     buffer_.publish_positions(positions_);
@@ -52,7 +57,8 @@ void PhysicsThread::run() {
 void integrate_step(std::vector<Vector3>& positions,
                     std::vector<Vector3>& velocities,
                     const std::vector<graph::Edge>& edges,
-                    const SimParams& params) {
+                    const SimParams& params,
+                    const std::vector<Vector3>& phantom_positions) {
     const std::size_t n = positions.size();
     std::vector<Vector3> forces(n, Vector3{0.0f, 0.0f, 0.0f});
 
@@ -82,6 +88,19 @@ void integrate_step(std::vector<Vector3>& positions,
         forces[i].z -= params.center_k * positions[i].z;
     }
 
+    // One-way phantom repulsion: each phantom shoves nearby static nodes
+    // with a much stronger Coulomb constant than static-vs-static. Phantoms
+    // do NOT accumulate reaction force — they're anchored at telemetry
+    // coordinates and never integrate.
+    for (const Vector3& ph : phantom_positions) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const Vector3 f = coulomb_force(positions[i], ph, 1.0f, 1.0f, params.phantom_repulsion_k);
+            forces[i].x += f.x;
+            forces[i].y += f.y;
+            forces[i].z += f.z;
+        }
+    }
+
     // Symplectic Euler integration with velocity damping and a hard speed cap.
     for (std::size_t i = 0; i < n; ++i) {
         velocities[i].x = (velocities[i].x + forces[i].x * params.dt) * params.damping;
@@ -105,7 +124,14 @@ void integrate_step(std::vector<Vector3>& positions,
 }
 
 void PhysicsThread::step() {
-    integrate_step(positions_, velocities_, edges_, params_);
+    std::vector<Vector3> phantom_positions;
+    if (phantom_buffer_) {
+        std::vector<telemetry::Phantom> phantoms;
+        phantom_buffer_->snapshot_and_expire(phantoms, params_.phantom_ttl, GetTime());
+        phantom_positions.reserve(phantoms.size());
+        for (const auto& p : phantoms) phantom_positions.push_back(p.position);
+    }
+    integrate_step(positions_, velocities_, edges_, params_, phantom_positions);
 }
 
 }  // namespace zg::physics
