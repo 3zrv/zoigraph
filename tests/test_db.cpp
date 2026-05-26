@@ -355,6 +355,36 @@ TEST_CASE("db: in-place edits survive a subsequent save_graph that preserves the
     CHECK(db.search("after").size() == 1);
 }
 
+TEST_CASE("db: update_node_text with empty title clears the previous FTS hit") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "previously-titled", ""}}, {});
+    REQUIRE(db.search("previously").size() == 1);
+
+    db.update_node_text(1, "", "");
+    CHECK(db.search("previously").empty());
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title.empty());
+    CHECK(nodes[0].content.empty());
+}
+
+TEST_CASE("db: save_graph with empty nodes leaves search returning nothing") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", "body"}}, {});
+    REQUIRE(db.search("alpha").size() == 1);
+
+    // Wipe the graph by saving an empty one. FTS should also be empty.
+    db.save_graph({}, {});
+    CHECK(db.search("alpha").empty());
+    CHECK(db.search("body").empty());
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    CHECK_FALSE(db.load_graph(nodes, edges));
+}
+
 TEST_CASE("db: load returns nodes ordered by id") {
     Database db(":memory:");
     db.save_graph({

@@ -136,6 +136,18 @@ TEST_CASE("hooke: action equals negative reaction for any pair") {
     }
 }
 
+TEST_CASE("coulomb: force magnitude falls off as 1 over r squared") {
+    // |F| = k * qa * qb / r^2. Doubling r should quarter the force.
+    auto magnitude = [](Vector3 v) {
+        return std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    };
+    const Vector3 f_near = coulomb_force({0, 0, 0}, {2, 0, 0}, 1.0f, 1.0f, 1.0f);
+    const Vector3 f_far  = coulomb_force({0, 0, 0}, {4, 0, 0}, 1.0f, 1.0f, 1.0f);
+
+    // m_near = 1/4, m_far = 1/16 → ratio 4.
+    CHECK(magnitude(f_near) / magnitude(f_far) == doctest::Approx(4.0f).epsilon(0.01f));
+}
+
 TEST_CASE("coulomb: zero charge on either endpoint yields zero force") {
     // Force magnitude is k * q_a * q_b / r^2 — if either charge is zero
     // the whole product is zero regardless of how close the two are.

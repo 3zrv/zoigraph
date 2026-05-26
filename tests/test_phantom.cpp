@@ -191,6 +191,33 @@ TEST_CASE("parse_phantom: connections that isn't an array is silently dropped") 
     CHECK(p->connections.empty());
 }
 
+TEST_CASE("parse_phantom: connections may include negative ids (no sign filter)") {
+    // The id space is just long long — negative ids are syntactically valid
+    // and we'd rather accept-and-discard-out-of-bounds in the renderer than
+    // reject the whole payload at parse time.
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":[-5,7,-99]})");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 3);
+    CHECK(p->connections[0] == -5);
+    CHECK(p->connections[1] == 7);
+    CHECK(p->connections[2] == -99);
+}
+
+TEST_CASE("parse_phantom: 100-entry connections array round-trips") {
+    std::string payload = R"({"id":1,"x":0,"y":0,"z":0,"connections":[)";
+    for (int i = 0; i < 100; ++i) {
+        if (i) payload += ',';
+        payload += std::to_string(i);
+    }
+    payload += "]}";
+
+    const auto p = parse_phantom(payload);
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 100);
+    CHECK(p->connections[0]  == 0);
+    CHECK(p->connections[99] == 99);
+}
+
 TEST_CASE("phantom_buffer: size is zero before any add") {
     PhantomBuffer buf;
     CHECK(buf.size() == 0);
@@ -265,6 +292,24 @@ TEST_CASE("phantom_buffer: snapshot returns phantoms in insertion order") {
     for (int i = 0; i < 5; ++i) {
         CHECK(out[static_cast<std::size_t>(i)].id == i);
     }
+}
+
+TEST_CASE("phantom_buffer: connections survive add and snapshot intact") {
+    PhantomBuffer buf;
+    Phantom p{};
+    p.id          = 1;
+    p.spawn_time  = 100.0;
+    p.connections = {12, 87, -3, 400};
+    buf.add(p);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].connections.size() == 4);
+    CHECK(out[0].connections[0] == 12);
+    CHECK(out[0].connections[1] == 87);
+    CHECK(out[0].connections[2] == -3);
+    CHECK(out[0].connections[3] == 400);
 }
 
 TEST_CASE("phantom_buffer: remove by id drops every matching entry") {

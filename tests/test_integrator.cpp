@@ -269,6 +269,47 @@ TEST_CASE("integrator: centering pulls a uniform cluster toward origin together"
     CHECK(std::fabs(end_centroid) < std::fabs(start_centroid));
 }
 
+TEST_CASE("integrator: three-node spring chain settles toward a line") {
+    // 0 -- 1 -- 2  (springs only, no other forces). Starting from a wiggly
+    // arrangement, the chain should end up roughly colinear in x with
+    // separations near rest_length each.
+    SimParams params = zero_forces();
+    params.spring_k    = 0.5f;
+    params.spring_rest = 3.0f;
+
+    std::vector<Vector3> positions  = {{-5, 0, 0}, {0, 2, 1}, {6, -1, 0}};
+    std::vector<Vector3> velocities(3, Vector3{0, 0, 0});
+    const std::vector<Edge> edges = {{0, 1}, {1, 2}};
+
+    for (int i = 0; i < 1000; ++i) {
+        integrate_step(positions, velocities, edges, params);
+    }
+
+    const float d01 = distance(positions[0], positions[1]);
+    const float d12 = distance(positions[1], positions[2]);
+    // Each spring should be near rest length.
+    CHECK(std::fabs(d01 - 3.0f) < 0.3f);
+    CHECK(std::fabs(d12 - 3.0f) < 0.3f);
+}
+
+TEST_CASE("integrator: max_speed = 0 hard-clamps every velocity to zero") {
+    SimParams params = zero_forces();
+    params.repulsion_k = 1000.0f;
+    params.damping     = 1.0f;
+    params.max_speed   = 0.0f;
+
+    std::vector<Vector3> positions  = {{0, 0, 0}, {0.05f, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}, {0, 0, 0}};
+    for (int i = 0; i < 10; ++i) {
+        integrate_step(positions, velocities, {}, params);
+    }
+    for (const auto& v : velocities) {
+        CHECK(v.x == doctest::Approx(0.0f));
+        CHECK(v.y == doctest::Approx(0.0f));
+        CHECK(v.z == doctest::Approx(0.0f));
+    }
+}
+
 TEST_CASE("integrator: empty positions / edges / phantoms is a safe no-op") {
     std::vector<Vector3> positions;
     std::vector<Vector3> velocities;
