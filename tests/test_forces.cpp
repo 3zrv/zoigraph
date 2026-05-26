@@ -136,6 +136,18 @@ TEST_CASE("hooke: action equals negative reaction for any pair") {
     }
 }
 
+TEST_CASE("coulomb: zero charge on either endpoint yields zero force") {
+    // Force magnitude is k * q_a * q_b / r^2 — if either charge is zero
+    // the whole product is zero regardless of how close the two are.
+    Vector3 f1 = coulomb_force({0, 0, 0}, {1, 0, 0}, 0.0f, 1.0f, 100.0f);
+    Vector3 f2 = coulomb_force({0, 0, 0}, {1, 0, 0}, 1.0f, 0.0f, 100.0f);
+    for (const auto& f : {f1, f2}) {
+        CHECK(near(f.x, 0.0f));
+        CHECK(near(f.y, 0.0f));
+        CHECK(near(f.z, 0.0f));
+    }
+}
+
 TEST_CASE("hooke: rest_length of zero gives pure attraction along the axis") {
     // With rest = 0, the spring tries to collapse the two points. Force on
     // `a` should point toward `b` with magnitude stiffness * distance.

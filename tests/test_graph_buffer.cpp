@@ -134,6 +134,42 @@ TEST_CASE("graph_buffer: multiple concurrent readers don't crash or deadlock") {
     producer.join();
 }
 
+TEST_CASE("graph_buffer: multiple concurrent producers don't crash; end state is consistent") {
+    // Two producers each repeatedly publish their own distinct vector. The
+    // mutex serializes the writes so any observed snapshot must be either
+    // all-A or all-B; never a mix. Worth checking because the original
+    // tests only exercised a single producer.
+    GraphBuffer buf;
+    std::atomic<bool> stop{false};
+
+    auto producer = [&](float value) {
+        const std::vector<Vector3> v(40, Vector3{value, value, value});
+        while (!stop.load(std::memory_order_relaxed)) {
+            buf.publish_positions(v);
+        }
+    };
+    std::thread p1(producer, 1.0f);
+    std::thread p2(producer, 2.0f);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(120)) {
+        std::vector<Vector3> positions;
+        std::vector<Edge>    edges;
+        buf.snapshot(positions, edges);
+        if (!positions.empty()) {
+            REQUIRE(positions.size() == 40);
+            const float v = positions[0].x;
+            REQUIRE((v == 1.0f || v == 2.0f));
+            for (const auto& p : positions) {
+                REQUIRE(p.x == v);  // no torn snapshot mixing the two values
+            }
+        }
+    }
+    stop.store(true);
+    p1.join();
+    p2.join();
+}
+
 TEST_CASE("graph_buffer: producer/consumer hammering doesn't tear a snapshot") {
     // Verifies the mutex actually guards against torn reads: a snapshot must
     // observe either the empty initial state OR a fully-formed vector where

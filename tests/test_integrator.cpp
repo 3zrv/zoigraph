@@ -269,6 +269,67 @@ TEST_CASE("integrator: centering pulls a uniform cluster toward origin together"
     CHECK(std::fabs(end_centroid) < std::fabs(start_centroid));
 }
 
+TEST_CASE("integrator: empty positions / edges / phantoms is a safe no-op") {
+    std::vector<Vector3> positions;
+    std::vector<Vector3> velocities;
+    SimParams params = zero_forces();
+    integrate_step(positions, velocities, {}, params);
+    integrate_step(positions, velocities, {}, params, {});
+    CHECK(positions.empty());
+    CHECK(velocities.empty());
+}
+
+TEST_CASE("PhysicsThread: start and stop are idempotent") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+
+    physics.start();
+    physics.start();  // second call is a no-op, no double-spawn
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    physics.stop();
+    physics.stop();   // second call is a no-op, no double-join
+
+    // Re-entering after a full stop should also work cleanly.
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    physics.stop();
+}
+
+TEST_CASE("PhysicsThread: enqueue_node before start() is picked up at first tick") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+
+    physics.enqueue_node({7.0f, 0.0f, 0.0f});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    CHECK(std::fabs(positions[1].x - 7.0f) < 2.0f);
+}
+
+TEST_CASE("PhysicsThread: empty initial positions doesn't crash and accepts enqueues") {
+    GraphBuffer buffer;
+    PhysicsThread physics({}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_node({3.0f, 0.0f, 0.0f});
+    physics.enqueue_node({0.0f, 3.0f, 0.0f});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(positions.size() == 2);
+}
+
 TEST_CASE("PhysicsThread: enqueue_node is drained on the next tick") {
     // Click-to-pin path: a phantom promoted to Static Node calls
     // enqueue_node(position) on the running physics thread, which must

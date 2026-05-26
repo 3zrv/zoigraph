@@ -319,6 +319,42 @@ TEST_CASE("db: an 8 KB content blob roundtrips exactly") {
     CHECK(nodes[0].content.size() == 8192);
 }
 
+TEST_CASE("db: repeated update_node_text final-write-wins") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "v1", ""}}, {});
+
+    db.update_node_text(1, "v2", "");
+    db.update_node_text(1, "v3", "");
+    db.update_node_text(1, "final", "settled body");
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "final");
+    CHECK(nodes[0].content == "settled body");
+    CHECK(db.search("v1").empty());
+    CHECK(db.search("v2").empty());
+    CHECK(db.search("final").size() == 1);
+}
+
+TEST_CASE("db: in-place edits survive a subsequent save_graph that preserves the row") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "before", ""}}, {});
+    db.update_node_text(1, "after", "edited");
+
+    // Simulate the main loop's save-on-shutdown path: re-save the entire
+    // graph with the StoredNode struct carrying the edited fields.
+    db.save_graph({{1, {1, 1, 1}, "after", "edited"}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "after");
+    CHECK(nodes[0].content == "edited");
+    CHECK(nodes[0].position.x == doctest::Approx(1.0f));
+    CHECK(db.search("after").size() == 1);
+}
+
 TEST_CASE("db: load returns nodes ordered by id") {
     Database db(":memory:");
     db.save_graph({

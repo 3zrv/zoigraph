@@ -126,6 +126,29 @@ TEST_CASE("parse_phantom: unknown extra fields are ignored, not rejected") {
     CHECK(p->id == 1);
 }
 
+TEST_CASE("parse_phantom: empty json object fails (no required fields)") {
+    CHECK_FALSE(parse_phantom("{}").has_value());
+}
+
+TEST_CASE("parse_phantom: required field explicitly null is rejected") {
+    CHECK_FALSE(parse_phantom(R"({"id":null,"x":0,"y":0,"z":0})").has_value());
+    CHECK_FALSE(parse_phantom(R"({"id":1,"x":null,"y":0,"z":0})").has_value());
+}
+
+TEST_CASE("parse_phantom: id supplied as a float (1.0) is rejected") {
+    // is_number_integer() distinguishes "1" from "1.0" in nlohmann/json;
+    // we want strict id semantics so external tools can rely on the parser
+    // refusing fractional ids rather than truncating them.
+    CHECK_FALSE(parse_phantom(R"({"id":1.0,"x":0,"y":0,"z":0})").has_value());
+    CHECK_FALSE(parse_phantom(R"({"id":1.5,"x":0,"y":0,"z":0})").has_value());
+}
+
+TEST_CASE("parse_phantom: leading/trailing whitespace around the JSON is fine") {
+    const auto p = parse_phantom("   \t\n{\"id\":7,\"x\":0,\"y\":0,\"z\":0}   \n");
+    REQUIRE(p.has_value());
+    CHECK(p->id == 7);
+}
+
 TEST_CASE("parse_phantom: label that isn't a string is silently dropped") {
     const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"label":42})");
     REQUIRE(p.has_value());
@@ -189,6 +212,23 @@ TEST_CASE("phantom_buffer: add after expire restores a populated snapshot") {
     buf.snapshot_and_expire(out, 60.0f, 1000.1);
     REQUIRE(out.size() == 1);
     CHECK(out[0].id == 2);
+}
+
+TEST_CASE("phantom_buffer: snapshot returns phantoms in insertion order") {
+    PhantomBuffer buf;
+    for (int i = 0; i < 5; ++i) {
+        Phantom p{};
+        p.id         = i;
+        p.spawn_time = 100.0;
+        buf.add(p);
+    }
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 5);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(out[static_cast<std::size_t>(i)].id == i);
+    }
 }
 
 TEST_CASE("phantom_buffer: remove by id drops every matching entry") {
