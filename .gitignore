@@ -9,3 +9,9 @@ compile_commands.json
 *.swo
 .DS_Store
 CLAUDE.md
+plan.md
+imgui.ini
+zoigraph.db
+zoigraph.db-journal
+zoigraph.db-wal
+zoigraph.db-shm
