@@ -4,6 +4,10 @@
 #include "persistence/db.h"
 
 #include <cmath>
+#include <cstdio>
+#include <string>
+#include <sys/types.h>
+#include <unistd.h>
 
 using zg::persistence::Database;
 using zg::persistence::StoredNode;
@@ -209,6 +213,42 @@ TEST_CASE("db: update_node_text updates the row and keeps FTS in sync") {
     REQUIRE(db.load_graph(nodes, edges));
     CHECK(nodes[0].title   == "new title");
     CHECK(nodes[0].content == "fresh content");
+}
+
+TEST_CASE("db: persistence survives close + reopen against a real file") {
+    const std::string path = "/tmp/zoigraph_test_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+    std::remove((path + "-journal").c_str());
+
+    {
+        Database db(path);
+        db.save_graph({
+            {1, {1.0f, 2.0f, 3.0f}, "persistent",  "marker body"},
+            {2, {4.0f, 5.0f, 6.0f}, "second-node", "more body"},
+        }, {{1, 2}});
+    }  // connection closes here
+
+    {
+        Database db(path);  // fresh connection against the same file
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        REQUIRE(nodes.size() == 2);
+        CHECK(nodes[0].title   == "persistent");
+        CHECK(nodes[0].content == "marker body");
+        CHECK(nodes[1].title   == "second-node");
+        REQUIRE(edges.size() == 1);
+        CHECK(edges[0].source == 1);
+        CHECK(edges[0].target == 2);
+
+        // rebuild-on-open path: search should work without any save_graph in
+        // this second connection.
+        REQUIRE(db.search("persistent").size() == 1);
+        CHECK(db.search("persistent")[0] == 1);
+    }
+
+    std::remove(path.c_str());
+    std::remove((path + "-journal").c_str());
 }
 
 TEST_CASE("db: load returns nodes ordered by id") {

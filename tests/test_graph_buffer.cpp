@@ -63,6 +63,20 @@ TEST_CASE("graph_buffer: set_edges is independent of positions") {
     CHECK(edges[2].target == 3);
 }
 
+TEST_CASE("graph_buffer: a later set_edges replaces the previous edge list") {
+    GraphBuffer buf;
+    buf.set_edges({{0, 1}, {1, 2}, {2, 3}});
+    buf.set_edges({{9, 9}});
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buf.snapshot(positions, edges);
+
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 9);
+    CHECK(edges[0].target == 9);
+}
+
 TEST_CASE("graph_buffer: edges and positions can be set in either order") {
     GraphBuffer buf;
     buf.publish_positions({{1, 1, 1}});

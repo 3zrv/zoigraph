@@ -49,23 +49,26 @@ void PhysicsThread::run() {
     }
 }
 
-void PhysicsThread::step() {
-    const std::size_t n = positions_.size();
+void integrate_step(std::vector<Vector3>& positions,
+                    std::vector<Vector3>& velocities,
+                    const std::vector<graph::Edge>& edges,
+                    const SimParams& params) {
+    const std::size_t n = positions.size();
     std::vector<Vector3> forces(n, Vector3{0.0f, 0.0f, 0.0f});
 
     // Pairwise Coulomb repulsion (O(N^2) — naive; Barnes-Hut comes later).
     for (std::size_t i = 0; i < n; ++i) {
         for (std::size_t j = i + 1; j < n; ++j) {
-            const Vector3 f = coulomb_force(positions_[i], positions_[j], 1.0f, 1.0f, params_.repulsion_k);
+            const Vector3 f = coulomb_force(positions[i], positions[j], 1.0f, 1.0f, params.repulsion_k);
             forces[i].x += f.x; forces[i].y += f.y; forces[i].z += f.z;
             forces[j].x -= f.x; forces[j].y -= f.y; forces[j].z -= f.z;
         }
     }
 
     // Hooke attraction along edges.
-    for (const graph::Edge& e : edges_) {
-        const Vector3 f = hooke_force(positions_[e.source], positions_[e.target],
-                                       params_.spring_rest, params_.spring_k);
+    for (const graph::Edge& e : edges) {
+        const Vector3 f = hooke_force(positions[e.source], positions[e.target],
+                                       params.spring_rest, params.spring_k);
         forces[e.source].x += f.x; forces[e.source].y += f.y; forces[e.source].z += f.z;
         forces[e.target].x -= f.x; forces[e.target].y -= f.y; forces[e.target].z -= f.z;
     }
@@ -74,31 +77,35 @@ void PhysicsThread::step() {
     // of 500, so without this, nodes with no springs drift outward indefinitely
     // under net Coulomb repulsion.
     for (std::size_t i = 0; i < n; ++i) {
-        forces[i].x -= params_.center_k * positions_[i].x;
-        forces[i].y -= params_.center_k * positions_[i].y;
-        forces[i].z -= params_.center_k * positions_[i].z;
+        forces[i].x -= params.center_k * positions[i].x;
+        forces[i].y -= params.center_k * positions[i].y;
+        forces[i].z -= params.center_k * positions[i].z;
     }
 
     // Symplectic Euler integration with velocity damping and a hard speed cap.
     for (std::size_t i = 0; i < n; ++i) {
-        velocities_[i].x = (velocities_[i].x + forces[i].x * params_.dt) * params_.damping;
-        velocities_[i].y = (velocities_[i].y + forces[i].y * params_.dt) * params_.damping;
-        velocities_[i].z = (velocities_[i].z + forces[i].z * params_.dt) * params_.damping;
+        velocities[i].x = (velocities[i].x + forces[i].x * params.dt) * params.damping;
+        velocities[i].y = (velocities[i].y + forces[i].y * params.dt) * params.damping;
+        velocities[i].z = (velocities[i].z + forces[i].z * params.dt) * params.damping;
 
-        const float speed2 = velocities_[i].x * velocities_[i].x
-                           + velocities_[i].y * velocities_[i].y
-                           + velocities_[i].z * velocities_[i].z;
-        if (speed2 > params_.max_speed * params_.max_speed) {
-            const float scale = params_.max_speed / std::sqrt(speed2);
-            velocities_[i].x *= scale;
-            velocities_[i].y *= scale;
-            velocities_[i].z *= scale;
+        const float speed2 = velocities[i].x * velocities[i].x
+                           + velocities[i].y * velocities[i].y
+                           + velocities[i].z * velocities[i].z;
+        if (speed2 > params.max_speed * params.max_speed) {
+            const float scale = params.max_speed / std::sqrt(speed2);
+            velocities[i].x *= scale;
+            velocities[i].y *= scale;
+            velocities[i].z *= scale;
         }
 
-        positions_[i].x += velocities_[i].x * params_.dt;
-        positions_[i].y += velocities_[i].y * params_.dt;
-        positions_[i].z += velocities_[i].z * params_.dt;
+        positions[i].x += velocities[i].x * params.dt;
+        positions[i].y += velocities[i].y * params.dt;
+        positions[i].z += velocities[i].z * params.dt;
     }
+}
+
+void PhysicsThread::step() {
+    integrate_step(positions_, velocities_, edges_, params_);
 }
 
 }  // namespace zg::physics
