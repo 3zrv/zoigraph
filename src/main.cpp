@@ -1,4 +1,5 @@
 #include <raylib.h>
+#include <raymath.h>
 
 #include <cstddef>
 #include <random>
@@ -10,10 +11,48 @@
 
 namespace {
 
-constexpr int kNodeCount = 500;
-constexpr int kEdgeCount = 30;
+constexpr int   kNodeCount     = 500;
+constexpr int   kEdgeCount     = 30;
 constexpr float kInitialSpread = 20.0f;
-constexpr int kSeed = 42;
+constexpr int   kSeed          = 42;
+constexpr float kNodeRadius    = 0.5f;
+
+// Minimal GLSL 330 shader pair for raylib's DrawMeshInstanced. The vertex
+// shader expects a per-instance mat4 named `instanceTransform`; raylib's
+// renderer wires it up via SHADER_LOC_MATRIX_MODEL.
+constexpr const char* kInstancingVS = R"GLSL(
+#version 330
+in vec3 vertexPosition;
+in vec2 vertexTexCoord;
+in vec3 vertexNormal;
+in vec4 vertexColor;
+in mat4 instanceTransform;
+
+out vec2 fragTexCoord;
+out vec4 fragColor;
+
+uniform mat4 mvp;
+
+void main() {
+    fragTexCoord = vertexTexCoord;
+    fragColor    = vertexColor;
+    gl_Position  = mvp * instanceTransform * vec4(vertexPosition, 1.0);
+}
+)GLSL";
+
+constexpr const char* kInstancingFS = R"GLSL(
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+
+uniform vec4 colDiffuse;
+
+out vec4 finalColor;
+
+void main() {
+    finalColor = colDiffuse;
+}
+)GLSL";
 
 std::vector<Vector3> make_initial_positions(int count) {
     std::mt19937 rng(kSeed);
@@ -43,7 +82,7 @@ std::vector<zg::graph::Edge> make_random_edges(int node_count, int edge_count) {
 }  // namespace
 
 int main() {
-    constexpr int kWidth = 1280;
+    constexpr int kWidth  = 1280;
     constexpr int kHeight = 800;
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
@@ -57,6 +96,15 @@ int main() {
     camera.fovy       = 60.0f;
     camera.projection = CAMERA_PERSPECTIVE;
 
+    Shader instancing_shader = LoadShaderFromMemory(kInstancingVS, kInstancingFS);
+    instancing_shader.locs[SHADER_LOC_MATRIX_MVP]   = GetShaderLocation(instancing_shader, "mvp");
+    instancing_shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(instancing_shader, "instanceTransform");
+
+    Mesh node_mesh = GenMeshSphere(kNodeRadius, 8, 12);
+    Material node_material = LoadMaterialDefault();
+    node_material.shader = instancing_shader;
+    node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
+
     zg::graph::GraphBuffer buffer;
     zg::physics::PhysicsThread physics(
         make_initial_positions(kNodeCount),
@@ -64,12 +112,19 @@ int main() {
         buffer);
     physics.start();
 
-    std::vector<Vector3>          positions;
-    std::vector<zg::graph::Edge>  edges;
+    std::vector<Vector3>         positions;
+    std::vector<zg::graph::Edge> edges;
+    std::vector<Matrix>          transforms;
+    transforms.reserve(kNodeCount);
 
     while (!WindowShouldClose()) {
         UpdateCamera(&camera, CAMERA_ORBITAL);
         buffer.snapshot(positions, edges);
+
+        transforms.clear();
+        for (const auto& p : positions) {
+            transforms.push_back(MatrixTranslate(p.x, p.y, p.z));
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -77,8 +132,10 @@ int main() {
         BeginMode3D(camera);
         DrawGrid(40, 5.0f);
 
-        for (const auto& p : positions) {
-            DrawSphere(p, 0.5f, RED);
+        if (!transforms.empty()) {
+            DrawMeshInstanced(node_mesh, node_material,
+                              transforms.data(),
+                              static_cast<int>(transforms.size()));
         }
 
         for (const auto& e : edges) {
@@ -98,6 +155,8 @@ int main() {
     }
 
     physics.stop();
+    UnloadMesh(node_mesh);
+    UnloadShader(instancing_shader);
     CloseWindow();
     return 0;
 }
