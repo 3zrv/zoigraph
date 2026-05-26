@@ -73,3 +73,48 @@ TEST_CASE("hooke: compressed spring pushes away from partner") {
     Vector3 f = hooke_force(a, b, 5.0f, 0.5f);  // compressed by 3, force on a points -x
     CHECK(f.x < 0.0f);
 }
+
+TEST_CASE("coulomb: k = 0 yields zero force regardless of geometry") {
+    Vector3 f = coulomb_force({1, 2, 3}, {4, 5, 6}, 1.0f, 1.0f, 0.0f);
+    CHECK(near(f.x, 0.0f));
+    CHECK(near(f.y, 0.0f));
+    CHECK(near(f.z, 0.0f));
+}
+
+TEST_CASE("coulomb: 3D diagonal direction is correctly normalized") {
+    // Unit charges, k=1, separated by (1,1,1). r^2=3, magnitude = 1/3.
+    // Direction (1,1,1)/sqrt(3). Each component = magnitude * 1/sqrt(3).
+    Vector3 f = coulomb_force({0, 0, 0}, {1, 1, 1}, 1.0f, 1.0f, 1.0f);
+    const float expected = -1.0f / (3.0f * std::sqrt(3.0f));
+    CHECK(near(f.x, expected));
+    CHECK(near(f.y, expected));
+    CHECK(near(f.z, expected));
+}
+
+TEST_CASE("hooke: identical positions yield zero force and no NaN") {
+    Vector3 f = hooke_force({3, 4, 5}, {3, 4, 5}, 1.0f, 0.5f);
+    CHECK(near(f.x, 0.0f));
+    CHECK(near(f.y, 0.0f));
+    CHECK(near(f.z, 0.0f));
+    CHECK_FALSE(std::isnan(f.x));
+    CHECK_FALSE(std::isnan(f.y));
+    CHECK_FALSE(std::isnan(f.z));
+}
+
+TEST_CASE("hooke: stretched 3D diagonal pulls along the correct axis") {
+    // Distance = sqrt(12), rest=1, stretch = sqrt(12) - 1.
+    // F on a toward b along (2,2,2)/sqrt(12).
+    Vector3 f = hooke_force({0, 0, 0}, {2, 2, 2}, 1.0f, 1.0f);
+    const float r        = std::sqrt(12.0f);
+    const float expected = (r - 1.0f) * 2.0f / r;
+    CHECK(near(f.x, expected));
+    CHECK(near(f.y, expected));
+    CHECK(near(f.z, expected));
+}
+
+TEST_CASE("hooke: zero stiffness yields zero force") {
+    Vector3 f = hooke_force({0, 0, 0}, {10, 0, 0}, 1.0f, 0.0f);
+    CHECK(near(f.x, 0.0f));
+    CHECK(near(f.y, 0.0f));
+    CHECK(near(f.z, 0.0f));
+}

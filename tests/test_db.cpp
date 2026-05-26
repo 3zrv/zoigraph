@@ -126,3 +126,82 @@ TEST_CASE("db: search index is rebuilt on save (no stale rows)") {
     REQUIRE(db.search("omega").size() == 1);
     CHECK(db.search("omega")[0] == 99);
 }
+
+TEST_CASE("db: save empty graph leaves the load returning false") {
+    Database db(":memory:");
+    db.save_graph({}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    CHECK_FALSE(db.load_graph(nodes, edges));
+    CHECK(nodes.empty());
+    CHECK(edges.empty());
+    CHECK(db.search("anything").empty());
+}
+
+TEST_CASE("db: titles and content with SQL-special characters roundtrip safely") {
+    Database db(":memory:");
+    const std::string tricky_title   = "it's; he said \"hi\"";
+    const std::string tricky_content = "'; DROP TABLE nodes; -- attempt";
+    db.save_graph({{1, {0,0,0}, tricky_title, tricky_content}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].title   == tricky_title);
+    CHECK(nodes[0].content == tricky_content);
+}
+
+TEST_CASE("db: unicode survives roundtrip and is searchable by ascii prefix") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "café αβγ 日本語", "espresso"}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "café αβγ 日本語");
+    CHECK(nodes[0].content == "espresso");
+
+    // FTS5 default tokenizer is unicode61; ascii prefix still hits the row.
+    CHECK(db.search("espresso").size() == 1);
+}
+
+TEST_CASE("db: search is case-insensitive") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "Alpha", ""}}, {});
+
+    CHECK(db.search("alpha").size() == 1);
+    CHECK(db.search("ALPHA").size() == 1);
+    CHECK(db.search("AlPhA").size() == 1);
+}
+
+TEST_CASE("db: multi-token search has AND semantics") {
+    Database db(":memory:");
+    db.save_graph({
+        {1, {0,0,0}, "supply chain analysis",       ""},
+        {2, {0,0,0}, "supply node only",            ""},
+        {3, {0,0,0}, "chain of evidence elsewhere", ""},
+    }, {});
+
+    const auto hits = db.search("supply chain");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0] == 1);
+}
+
+TEST_CASE("db: load returns nodes ordered by id") {
+    Database db(":memory:");
+    db.save_graph({
+        {7, {0,0,0}, "seven", ""},
+        {2, {0,0,0}, "two",   ""},
+        {5, {0,0,0}, "five",  ""},
+    }, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 3);
+    CHECK(nodes[0].id == 2);
+    CHECK(nodes[1].id == 5);
+    CHECK(nodes[2].id == 7);
+}
