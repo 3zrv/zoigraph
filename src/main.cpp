@@ -295,11 +295,11 @@ int main() {
             ImGui::TextDisabled("(left-click a node)");
         }
         ImGui::Separator();
-        ImGui::TextDisabled("L-CLICK  select");
-        ImGui::TextDisabled("R-DRAG   orbit");
-        ImGui::TextDisabled("M-DRAG   pan");
-        ImGui::TextDisabled("WHEEL    zoom");
-        ImGui::TextDisabled("R        reset view");
+        ImGui::TextDisabled("LEFT-CLICK     select node");
+        ImGui::TextDisabled("RIGHT-DRAG     orbit");
+        ImGui::TextDisabled("MIDDLE-DRAG    pan");
+        ImGui::TextDisabled("SCROLL WHEEL   zoom");
+        ImGui::TextDisabled("R KEY          reset view");
         ImGui::End();
         rlImGuiEnd();
 
