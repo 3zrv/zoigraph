@@ -155,6 +155,42 @@ TEST_CASE("parse_phantom: label that isn't a string is silently dropped") {
     CHECK(p->label.empty());
 }
 
+TEST_CASE("parse_phantom: connections array of integers is picked up") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":[12,87,400]})");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 3);
+    CHECK(p->connections[0] == 12);
+    CHECK(p->connections[1] == 87);
+    CHECK(p->connections[2] == 400);
+}
+
+TEST_CASE("parse_phantom: missing connections field yields empty vector") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0})");
+    REQUIRE(p.has_value());
+    CHECK(p->connections.empty());
+}
+
+TEST_CASE("parse_phantom: empty connections array yields empty vector") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":[]})");
+    REQUIRE(p.has_value());
+    CHECK(p->connections.empty());
+}
+
+TEST_CASE("parse_phantom: non-integer entries inside connections are silently skipped") {
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"connections":[5,"hello",3.14,null,9]})");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 2);
+    CHECK(p->connections[0] == 5);
+    CHECK(p->connections[1] == 9);
+}
+
+TEST_CASE("parse_phantom: connections that isn't an array is silently dropped") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":"oops"})");
+    REQUIRE(p.has_value());
+    CHECK(p->connections.empty());
+}
+
 TEST_CASE("phantom_buffer: size is zero before any add") {
     PhantomBuffer buf;
     CHECK(buf.size() == 0);

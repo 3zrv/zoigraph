@@ -31,6 +31,13 @@ std::optional<Phantom> parse_phantom(std::string_view payload) {
     if (j.contains("label") && j["label"].is_string()) {
         p.label = j["label"].get<std::string>();
     }
+    if (j.contains("connections") && j["connections"].is_array()) {
+        for (const auto& v : j["connections"]) {
+            if (v.is_number_integer()) {
+                p.connections.push_back(v.get<long long>());
+            }
+        }
+    }
     p.spawn_time = 0.0;
     return p;
 }
