@@ -89,9 +89,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(doctest)
 
+# ---- physics (pure functions, separately testable) -------------------------
+add_library(zg_physics STATIC src/physics/forces.cpp)
+target_include_directories(zg_physics PUBLIC src)
+target_link_libraries(zg_physics PUBLIC raylib)
+
 # ---- application -----------------------------------------------------------
 add_executable(zoigraph src/main.cpp)
 target_link_libraries(zoigraph PRIVATE
+    zg_physics
     raylib
     rlimgui
     imgui
