@@ -42,8 +42,12 @@ add_library(imgui STATIC
     ${imgui_src_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_src_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_src_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_src_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
 )
-target_include_directories(imgui PUBLIC ${imgui_src_SOURCE_DIR})
+target_include_directories(imgui PUBLIC
+    ${imgui_src_SOURCE_DIR}
+    ${imgui_src_SOURCE_DIR}/misc/cpp
+)
 
 # ---- rlImGui (raylib ImGui backend) ----------------------------------------
 FetchContent_Declare(
@@ -112,6 +116,18 @@ add_library(zg_persistence STATIC src/persistence/db.cpp)
 target_include_directories(zg_persistence PUBLIC src)
 target_link_libraries(zg_persistence PUBLIC zg_graph sqlite3 raylib)
 
+# ---- telemetry (Thread 3: UDP listener + phantom buffer) -------------------
+add_library(zg_telemetry STATIC
+    src/telemetry/phantom_buffer.cpp
+    src/telemetry/phantom_parse.cpp
+    src/telemetry/telemetry_thread.cpp
+)
+target_include_directories(zg_telemetry PUBLIC src)
+target_link_libraries(zg_telemetry PUBLIC nlohmann_json::nlohmann_json raylib)
+if(NOT WIN32)
+    target_link_libraries(zg_telemetry PUBLIC pthread)
+endif()
+
 # ---- application -----------------------------------------------------------
 add_executable(zoigraph src/main.cpp)
 target_link_libraries(zoigraph PRIVATE
@@ -119,6 +135,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_graph
     zg_physics_thread
     zg_persistence
+    zg_telemetry
     raylib
     rlimgui
     imgui

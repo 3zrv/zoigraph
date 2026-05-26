@@ -1,7 +1,9 @@
 #include <raylib.h>
 #include <raymath.h>
+#include <rlgl.h>
 
 #include <imgui.h>
+#include <imgui_stdlib.h>
 #include <rlImGui.h>
 
 #include <algorithm>
@@ -14,14 +16,20 @@
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
+#include "telemetry/phantom.h"
+#include "telemetry/phantom_buffer.h"
+#include "telemetry/telemetry_thread.h"
 
 namespace {
 
-constexpr int   kNodeCount     = 500;
-constexpr int   kEdgeCount     = 30;
-constexpr float kInitialSpread = 20.0f;
-constexpr int   kSeed          = 42;
-constexpr float kNodeRadius    = 0.5f;
+constexpr int   kNodeCount      = 500;
+constexpr int   kEdgeCount      = 30;
+constexpr float kInitialSpread  = 20.0f;
+constexpr int   kSeed           = 42;
+constexpr float kNodeRadius     = 0.5f;
+constexpr int   kTelemetryPort  = 7777;
+constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
+constexpr float kPhantomRadius  = 1.2f;    // visibly larger than static nodes
 
 // Minimal GLSL 330 shader pair for raylib's DrawMeshInstanced. The vertex
 // shader expects a per-instance mat4 named `instanceTransform`; raylib's
@@ -57,6 +65,46 @@ out vec4 finalColor;
 
 void main() {
     finalColor = colDiffuse;
+}
+)GLSL";
+
+// CRT post-process: chromatic aberration, scrolling scanlines, vignette.
+// Operates over fragTexCoord (0..1) from a fullscreen draw of the scene
+// RenderTexture. Resolution and time uniforms drive the per-frame look.
+constexpr const char* kCrtFS = R"GLSL(
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec2 resolution;
+uniform float time;
+
+out vec4 finalColor;
+
+void main() {
+    vec2 uv = fragTexCoord;
+    vec2 center = vec2(0.5, 0.5);
+
+    // Chromatic aberration: separate R / B sampling offsets, growing with
+    // distance from screen center.
+    vec2 ab = (uv - center) * 0.0035;
+    float r = texture(texture0, uv + ab).r;
+    float g = texture(texture0, uv).g;
+    float b = texture(texture0, uv - ab).b;
+    vec3 col = vec3(r, g, b);
+
+    // Scanlines: vertical sinusoid in pixel space, slowly scrolling.
+    float scan = sin((uv.y * resolution.y + time * 18.0) * 1.4) * 0.5 + 0.5;
+    col *= mix(0.78, 1.0, scan);
+
+    // Vignette: darken everything outside the central 60%.
+    float d = length(uv - center);
+    float vignette = smoothstep(0.85, 0.35, d);
+    col *= vignette;
+
+    finalColor = vec4(col, 1.0) * colDiffuse;
 }
 )GLSL";
 
@@ -194,6 +242,14 @@ int main() {
     node_material.shader = instancing_shader;
     node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
+    // CRT post-process pipeline: render the 3D scene into a texture, then
+    // draw it back through the CRT shader. ImGui is layered on top of the
+    // composite so the inspector stays crisp.
+    RenderTexture2D scene_rt = LoadRenderTexture(kWidth, kHeight);
+    Shader crt_shader = LoadShaderFromMemory(nullptr, kCrtFS);
+    const int loc_crt_resolution = GetShaderLocation(crt_shader, "resolution");
+    const int loc_crt_time       = GetShaderLocation(crt_shader, "time");
+
     // Persistence: hydrate the graph from disk if a previous run saved one;
     // otherwise generate a fresh random layout. Node id == array index for
     // now — when deletion lands we'll need an id-to-index remap on load.
@@ -221,16 +277,31 @@ int main() {
         buffer);
     physics.start();
 
+    zg::telemetry::PhantomBuffer    phantom_buffer;
+    zg::telemetry::TelemetryThread  telemetry(kTelemetryPort, phantom_buffer);
+    telemetry.start();
+
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
     transforms.reserve(kNodeCount);
 
-    int selected_node = -1;
+    int                              selected_node = -1;
+    std::string                      search_query;
+    std::vector<long long>           search_hits;
+    std::vector<zg::telemetry::Phantom> phantoms;
+    bool                             show_grid     = true;
+    bool                             post_process  = true;
 
     while (!WindowShouldClose()) {
+        if (IsWindowResized()) {
+            UnloadRenderTexture(scene_rt);
+            scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+        }
+
         update_orbit_camera(camera);
         buffer.snapshot(positions, edges);
+        phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Raypick on left-click, but only when ImGui isn't already eating the
         // mouse. Uses last frame's WantCaptureMouse, which is fine — the panel
@@ -254,11 +325,13 @@ int main() {
             transforms.push_back(MatrixTranslate(p.x, p.y, p.z));
         }
 
-        BeginDrawing();
+        // 3D pass renders into the off-screen RT so the CRT shader can post-
+        // process it before ImGui draws on top.
+        BeginTextureMode(scene_rt);
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
-        DrawGrid(40, 5.0f);
+        if (show_grid) DrawGrid(40, 5.0f);
 
         if (!transforms.empty()) {
             DrawMeshInstanced(node_mesh, node_material,
@@ -275,27 +348,121 @@ int main() {
         if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
             DrawSphereWires(positions[selected_node], kNodeRadius * 1.6f, 10, 10, YELLOW);
         }
+
+        // Phantom nodes: additive-blended glowing wireframes whose alpha
+        // fades over the 60-second TTL. Drawn after the static layer so the
+        // glow accumulates against the dark background rather than mixing
+        // with the red nodes.
+        if (!phantoms.empty()) {
+            rlSetBlendMode(RL_BLEND_ADDITIVE);
+            const double now = GetTime();
+            for (const auto& ph : phantoms) {
+                const float age = static_cast<float>(now - ph.spawn_time);
+                const float life = std::clamp(1.0f - age / kPhantomTtl, 0.0f, 1.0f);
+                const Color glow{255, 200, 60, static_cast<unsigned char>(life * 255.0f)};
+                DrawSphereWires(ph.position, kPhantomRadius, 6, 8, glow);
+            }
+            rlSetBlendMode(RL_BLEND_ALPHA);
+        }
         EndMode3D();
+        EndTextureMode();
+
+        // Composite the 3D RT to the back buffer, optionally through the CRT
+        // post-process. RenderTextures store flipped vertically — pass a
+        // negative source height so the rendered image isn't upside down.
+        BeginDrawing();
+        ClearBackground(BLACK);
+
+        const float scr_w = static_cast<float>(GetScreenWidth());
+        const float scr_h = static_cast<float>(GetScreenHeight());
+        if (post_process) {
+            const Vector2 res{scr_w, scr_h};
+            const float   t = static_cast<float>(GetTime());
+            SetShaderValue(crt_shader, loc_crt_resolution, &res, SHADER_UNIFORM_VEC2);
+            SetShaderValue(crt_shader, loc_crt_time,       &t,   SHADER_UNIFORM_FLOAT);
+            BeginShaderMode(crt_shader);
+        }
+        const Rectangle src{0, 0,
+                            static_cast<float>(scene_rt.texture.width),
+                            -static_cast<float>(scene_rt.texture.height)};
+        const Rectangle dst{0, 0, scr_w, scr_h};
+        DrawTexturePro(scene_rt.texture, src, dst, {0, 0}, 0.0f, WHITE);
+        if (post_process) {
+            EndShaderMode();
+        }
 
         rlImGuiBegin();
         ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(280, 180), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(360, 600), ImGuiCond_FirstUseEver);
         ImGui::Begin("// INSPECTOR //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
-        ImGui::Text("nodes   %d", static_cast<int>(positions.size()));
-        ImGui::Text("edges   %d", static_cast<int>(edges.size()));
-        ImGui::Text("fps     %d", GetFPS());
+        ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
+        ImGui::Text("edges    %d", static_cast<int>(edges.size()));
+        ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
+                    telemetry.listening() ? "(udp :7777)" : "(listener off)");
+        ImGui::Text("fps      %d", GetFPS());
         ImGui::Separator();
-        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
+
+        // Real-time FTS5 search: on each keystroke, re-query the DB and jump
+        // camera + selection to the top hit. The DB save_graph happens on
+        // edits/shutdown, so the index reflects the on-disk state — local
+        // unsaved edits to title/content won't surface until "save to disk."
+        if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
+            search_hits = db.search(search_query);
+            if (!search_hits.empty()) {
+                const auto idx = static_cast<std::size_t>(search_hits.front());
+                if (idx < positions.size()) {
+                    selected_node = static_cast<int>(idx);
+                    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
+                    camera.target = positions[idx];
+                    camera.position = Vector3Add(camera.target, offset);
+                }
+            }
+        }
+        if (!search_query.empty()) {
+            ImGui::TextDisabled("%d match%s",
+                                static_cast<int>(search_hits.size()),
+                                search_hits.size() == 1 ? "" : "es");
+        }
+        ImGui::Separator();
+        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()
+            && static_cast<std::size_t>(selected_node) < stored_nodes.size()) {
             const Vector3 p = positions[selected_node];
-            ImGui::Text("selected node %d", selected_node);
-            ImGui::Text("  pos %+6.1f %+6.1f %+6.1f", p.x, p.y, p.z);
-            if (ImGui::SmallButton("clear##sel")) selected_node = -1;
+            ImGui::Text("node %d   pos %+6.1f %+6.1f %+6.1f", selected_node, p.x, p.y, p.z);
+            ImGui::Spacing();
+
+            auto& sn = stored_nodes[selected_node];
+            bool text_changed = false;
+            text_changed |= ImGui::InputText("title", &sn.title);
+            ImGui::TextDisabled("content (markdown)");
+            text_changed |= ImGui::InputTextMultiline(
+                "##content", &sn.content,
+                ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
+            if (text_changed) {
+                // Persist the edit immediately so search picks it up on the
+                // next keystroke; triggers keep the FTS index in sync.
+                db.update_node_text(sn.id, sn.title, sn.content);
+                // The query may now have new hits.
+                search_hits = db.search(search_query);
+            }
+
+            if (ImGui::Button("save to disk")) {
+                for (std::size_t i = 0;
+                     i < positions.size() && i < stored_nodes.size(); ++i) {
+                    stored_nodes[i].position = positions[i];
+                }
+                db.save_graph(stored_nodes, edges);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("deselect")) selected_node = -1;
         } else {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");
         }
+        ImGui::Separator();
+        ImGui::Checkbox("show grid", &show_grid);
+        ImGui::Checkbox("CRT post-process", &post_process);
         ImGui::Separator();
         ImGui::TextDisabled("LEFT-CLICK         select node");
         ImGui::TextDisabled("RIGHT-DRAG         orbit");
@@ -308,6 +475,7 @@ int main() {
         EndDrawing();
     }
 
+    telemetry.stop();
     physics.stop();
 
     // Persist the converged layout. Titles and content carry through from the
@@ -322,6 +490,8 @@ int main() {
     }
     db.save_graph(stored_nodes, final_edges);
 
+    UnloadRenderTexture(scene_rt);
+    UnloadShader(crt_shader);
     UnloadMesh(node_mesh);
     UnloadShader(instancing_shader);
     rlImGuiShutdown();

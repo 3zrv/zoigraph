@@ -4,6 +4,10 @@
 #include "persistence/db.h"
 
 #include <cmath>
+#include <cstdio>
+#include <string>
+#include <sys/types.h>
+#include <unistd.h>
 
 using zg::persistence::Database;
 using zg::persistence::StoredNode;
@@ -71,4 +75,195 @@ TEST_CASE("db: save_graph replaces previous contents") {
     REQUIRE(edges.size() == 1);
     CHECK(edges[0].source == 42);
     CHECK(edges[0].target == 42);
+}
+
+TEST_CASE("db: search returns empty for empty / non-alphanumeric input") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+    CHECK(db.search("").empty());
+    CHECK(db.search("   ").empty());
+    CHECK(db.search("!!!").empty());
+}
+
+TEST_CASE("db: search matches titles and content with prefix semantics") {
+    Database db(":memory:");
+    db.save_graph({
+        {1, {0,0,0}, "alpha node",     "investigate the supply chain"},
+        {2, {0,0,0}, "beta target",    "no overlap here"},
+        {3, {0,0,0}, "gamma vendor",   "supply route mapping"},
+    }, {});
+
+    SUBCASE("title prefix match") {
+        const auto hits = db.search("alph");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0] == 1);
+    }
+
+    SUBCASE("content match returns its node") {
+        const auto hits = db.search("investigate");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0] == 1);
+    }
+
+    SUBCASE("shared term across nodes returns both") {
+        const auto hits = db.search("supply");
+        REQUIRE(hits.size() == 2);
+        // Order is FTS rank-driven; just assert membership.
+        CHECK((hits[0] == 1 || hits[0] == 3));
+        CHECK((hits[1] == 1 || hits[1] == 3));
+        CHECK(hits[0] != hits[1]);
+    }
+
+    SUBCASE("no match returns empty") {
+        CHECK(db.search("zzzzzz").empty());
+    }
+}
+
+TEST_CASE("db: search index is rebuilt on save (no stale rows)") {
+    Database db(":memory:");
+    db.save_graph({{7, {0,0,0}, "alpha", ""}}, {});
+    REQUIRE(db.search("alpha").size() == 1);
+
+    // Replace the graph; old "alpha" should not survive.
+    db.save_graph({{99, {0,0,0}, "omega", ""}}, {});
+    CHECK(db.search("alpha").empty());
+    REQUIRE(db.search("omega").size() == 1);
+    CHECK(db.search("omega")[0] == 99);
+}
+
+TEST_CASE("db: save empty graph leaves the load returning false") {
+    Database db(":memory:");
+    db.save_graph({}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    CHECK_FALSE(db.load_graph(nodes, edges));
+    CHECK(nodes.empty());
+    CHECK(edges.empty());
+    CHECK(db.search("anything").empty());
+}
+
+TEST_CASE("db: titles and content with SQL-special characters roundtrip safely") {
+    Database db(":memory:");
+    const std::string tricky_title   = "it's; he said \"hi\"";
+    const std::string tricky_content = "'; DROP TABLE nodes; -- attempt";
+    db.save_graph({{1, {0,0,0}, tricky_title, tricky_content}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].title   == tricky_title);
+    CHECK(nodes[0].content == tricky_content);
+}
+
+TEST_CASE("db: unicode survives roundtrip and is searchable by ascii prefix") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "café αβγ 日本語", "espresso"}}, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "café αβγ 日本語");
+    CHECK(nodes[0].content == "espresso");
+
+    // FTS5 default tokenizer is unicode61; ascii prefix still hits the row.
+    CHECK(db.search("espresso").size() == 1);
+}
+
+TEST_CASE("db: search is case-insensitive") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "Alpha", ""}}, {});
+
+    CHECK(db.search("alpha").size() == 1);
+    CHECK(db.search("ALPHA").size() == 1);
+    CHECK(db.search("AlPhA").size() == 1);
+}
+
+TEST_CASE("db: multi-token search has AND semantics") {
+    Database db(":memory:");
+    db.save_graph({
+        {1, {0,0,0}, "supply chain analysis",       ""},
+        {2, {0,0,0}, "supply node only",            ""},
+        {3, {0,0,0}, "chain of evidence elsewhere", ""},
+    }, {});
+
+    const auto hits = db.search("supply chain");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0] == 1);
+}
+
+TEST_CASE("db: update_node_text updates the row and keeps FTS in sync") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "old title", "old body"}}, {});
+
+    REQUIRE(db.search("old").size() == 1);
+    REQUIRE(db.search("new").empty());
+
+    db.update_node_text(1, "new title", "fresh content");
+
+    CHECK(db.search("old").empty());
+    REQUIRE(db.search("new").size() == 1);
+    CHECK(db.search("new")[0] == 1);
+    REQUIRE(db.search("fresh").size() == 1);
+    REQUIRE(db.search("content").size() == 1);
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "new title");
+    CHECK(nodes[0].content == "fresh content");
+}
+
+TEST_CASE("db: persistence survives close + reopen against a real file") {
+    const std::string path = "/tmp/zoigraph_test_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+    std::remove((path + "-journal").c_str());
+
+    {
+        Database db(path);
+        db.save_graph({
+            {1, {1.0f, 2.0f, 3.0f}, "persistent",  "marker body"},
+            {2, {4.0f, 5.0f, 6.0f}, "second-node", "more body"},
+        }, {{1, 2}});
+    }  // connection closes here
+
+    {
+        Database db(path);  // fresh connection against the same file
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        REQUIRE(nodes.size() == 2);
+        CHECK(nodes[0].title   == "persistent");
+        CHECK(nodes[0].content == "marker body");
+        CHECK(nodes[1].title   == "second-node");
+        REQUIRE(edges.size() == 1);
+        CHECK(edges[0].source == 1);
+        CHECK(edges[0].target == 2);
+
+        // rebuild-on-open path: search should work without any save_graph in
+        // this second connection.
+        REQUIRE(db.search("persistent").size() == 1);
+        CHECK(db.search("persistent")[0] == 1);
+    }
+
+    std::remove(path.c_str());
+    std::remove((path + "-journal").c_str());
+}
+
+TEST_CASE("db: load returns nodes ordered by id") {
+    Database db(":memory:");
+    db.save_graph({
+        {7, {0,0,0}, "seven", ""},
+        {2, {0,0,0}, "two",   ""},
+        {5, {0,0,0}, "five",  ""},
+    }, {});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 3);
+    CHECK(nodes[0].id == 2);
+    CHECK(nodes[1].id == 5);
+    CHECK(nodes[2].id == 7);
 }

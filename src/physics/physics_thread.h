@@ -22,6 +22,15 @@ struct SimParams {
     int   target_hz     = 120;    // physics tick rate
 };
 
+// One step of the force-directed integration: sum pairwise Coulomb + per-edge
+// Hooke + centering force, integrate with damping + speed cap. Pure (apart
+// from mutating the passed-in vectors), so it's directly unit-testable
+// without a thread or a render loop.
+void integrate_step(std::vector<Vector3>& positions,
+                    std::vector<Vector3>& velocities,
+                    const std::vector<graph::Edge>& edges,
+                    const SimParams& params);
+
 // Owns the simulation state and a background std::thread. Publishes positions
 // to a GraphBuffer that the render thread reads each frame.
 class PhysicsThread {

@@ -41,6 +41,16 @@ public:
     bool load_graph(std::vector<StoredNode>& nodes,
                     std::vector<graph::Edge>& edges) const;
 
+    // FTS5 prefix-match search across node titles + content. Returns matching
+    // node ids ranked by FTS relevance, capped at a small limit. Empty query
+    // (or one that sanitizes to nothing) returns no results.
+    std::vector<long long> search(const std::string& query) const;
+
+    // Updates the title and content of one node. The FTS index is kept in
+    // sync via triggers, so a subsequent search() sees the new text without
+    // any separate rebuild.
+    void update_node_text(long long id, const std::string& title, const std::string& content);
+
 private:
     void exec(const char* sql);
 
