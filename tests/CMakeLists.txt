@@ -16,3 +16,7 @@ if(NOT WIN32)
     target_link_libraries(test_graph_buffer PRIVATE pthread)
 endif()
 add_test(NAME graph_buffer COMMAND test_graph_buffer)
+
+add_executable(test_phantom test_phantom.cpp)
+target_link_libraries(test_phantom PRIVATE zg_telemetry doctest::doctest)
+add_test(NAME phantom COMMAND test_phantom)

@@ -1,5 +1,6 @@
 #include <raylib.h>
 #include <raymath.h>
+#include <rlgl.h>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -15,14 +16,20 @@
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
+#include "telemetry/phantom.h"
+#include "telemetry/phantom_buffer.h"
+#include "telemetry/telemetry_thread.h"
 
 namespace {
 
-constexpr int   kNodeCount     = 500;
-constexpr int   kEdgeCount     = 30;
-constexpr float kInitialSpread = 20.0f;
-constexpr int   kSeed          = 42;
-constexpr float kNodeRadius    = 0.5f;
+constexpr int   kNodeCount      = 500;
+constexpr int   kEdgeCount      = 30;
+constexpr float kInitialSpread  = 20.0f;
+constexpr int   kSeed           = 42;
+constexpr float kNodeRadius     = 0.5f;
+constexpr int   kTelemetryPort  = 7777;
+constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
+constexpr float kPhantomRadius  = 1.2f;    // visibly larger than static nodes
 
 // Minimal GLSL 330 shader pair for raylib's DrawMeshInstanced. The vertex
 // shader expects a per-instance mat4 named `instanceTransform`; raylib's
@@ -222,18 +229,24 @@ int main() {
         buffer);
     physics.start();
 
+    zg::telemetry::PhantomBuffer    phantom_buffer;
+    zg::telemetry::TelemetryThread  telemetry(kTelemetryPort, phantom_buffer);
+    telemetry.start();
+
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
     transforms.reserve(kNodeCount);
 
-    int                    selected_node = -1;
-    std::string            search_query;
-    std::vector<long long> search_hits;
+    int                              selected_node = -1;
+    std::string                      search_query;
+    std::vector<long long>           search_hits;
+    std::vector<zg::telemetry::Phantom> phantoms;
 
     while (!WindowShouldClose()) {
         update_orbit_camera(camera);
         buffer.snapshot(positions, edges);
+        phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Raypick on left-click, but only when ImGui isn't already eating the
         // mouse. Uses last frame's WantCaptureMouse, which is fine — the panel
@@ -278,6 +291,22 @@ int main() {
         if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
             DrawSphereWires(positions[selected_node], kNodeRadius * 1.6f, 10, 10, YELLOW);
         }
+
+        // Phantom nodes: additive-blended glowing wireframes whose alpha
+        // fades over the 60-second TTL. Drawn after the static layer so the
+        // glow accumulates against the dark background rather than mixing
+        // with the red nodes.
+        if (!phantoms.empty()) {
+            rlSetBlendMode(RL_BLEND_ADDITIVE);
+            const double now = GetTime();
+            for (const auto& ph : phantoms) {
+                const float age = static_cast<float>(now - ph.spawn_time);
+                const float life = std::clamp(1.0f - age / kPhantomTtl, 0.0f, 1.0f);
+                const Color glow{255, 200, 60, static_cast<unsigned char>(life * 255.0f)};
+                DrawSphereWires(ph.position, kPhantomRadius, 6, 8, glow);
+            }
+            rlSetBlendMode(RL_BLEND_ALPHA);
+        }
         EndMode3D();
 
         rlImGuiBegin();
@@ -286,9 +315,11 @@ int main() {
         ImGui::Begin("// INSPECTOR //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
-        ImGui::Text("nodes   %d", static_cast<int>(positions.size()));
-        ImGui::Text("edges   %d", static_cast<int>(edges.size()));
-        ImGui::Text("fps     %d", GetFPS());
+        ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
+        ImGui::Text("edges    %d", static_cast<int>(edges.size()));
+        ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
+                    telemetry.listening() ? "(udp :7777)" : "(listener off)");
+        ImGui::Text("fps      %d", GetFPS());
         ImGui::Separator();
 
         // Real-time FTS5 search: on each keystroke, re-query the DB and jump
@@ -359,6 +390,7 @@ int main() {
         EndDrawing();
     }
 
+    telemetry.stop();
     physics.stop();
 
     // Persist the converged layout. Titles and content carry through from the
