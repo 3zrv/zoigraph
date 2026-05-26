@@ -94,10 +94,25 @@ add_library(zg_physics STATIC src/physics/forces.cpp)
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- graph (thread-safe buffer between physics and render) -----------------
+add_library(zg_graph STATIC src/graph/graph_buffer.cpp)
+target_include_directories(zg_graph PUBLIC src)
+target_link_libraries(zg_graph PUBLIC raylib)
+
+# ---- physics simulation thread ---------------------------------------------
+add_library(zg_physics_thread STATIC src/physics/physics_thread.cpp)
+target_include_directories(zg_physics_thread PUBLIC src)
+target_link_libraries(zg_physics_thread PUBLIC zg_physics zg_graph raylib)
+if(NOT WIN32)
+    target_link_libraries(zg_physics_thread PUBLIC pthread)
+endif()
+
 # ---- application -----------------------------------------------------------
 add_executable(zoigraph src/main.cpp)
 target_link_libraries(zoigraph PRIVATE
     zg_physics
+    zg_graph
+    zg_physics_thread
     raylib
     rlimgui
     imgui
