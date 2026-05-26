@@ -70,6 +70,15 @@ void PhysicsThread::step() {
         forces[e.target].x -= f.x; forces[e.target].y -= f.y; forces[e.target].z -= f.z;
     }
 
+    // Centering pull toward origin. Edges only constrain the ~60 endpoints out
+    // of 500, so without this, nodes with no springs drift outward indefinitely
+    // under net Coulomb repulsion.
+    for (std::size_t i = 0; i < n; ++i) {
+        forces[i].x -= params_.center_k * positions_[i].x;
+        forces[i].y -= params_.center_k * positions_[i].y;
+        forces[i].z -= params_.center_k * positions_[i].z;
+    }
+
     // Symplectic Euler integration with velocity damping and a hard speed cap.
     for (std::size_t i = 0; i < n; ++i) {
         velocities_[i].x = (velocities_[i].x + forces[i].x * params_.dt) * params_.damping;

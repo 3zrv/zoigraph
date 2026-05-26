@@ -15,6 +15,7 @@ struct SimParams {
     float repulsion_k   = 80.0f;  // Coulomb constant
     float spring_rest   = 4.0f;
     float spring_k      = 0.05f;
+    float center_k      = 0.5f;   // linear pull toward origin, keeps cluster bounded
     float damping       = 0.85f;
     float dt            = 0.05f;
     float max_speed     = 20.0f;  // velocity clamp to prevent blow-up

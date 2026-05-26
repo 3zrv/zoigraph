@@ -4,12 +4,15 @@
 #include <imgui.h>
 #include <rlImGui.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <random>
 #include <vector>
 
 #include "graph/graph_buffer.h"
 #include "graph/types.h"
+#include "persistence/db.h"
 #include "physics/physics_thread.h"
 
 namespace {
@@ -106,6 +109,62 @@ void apply_terminal_theme() {
     c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
 }
 
+constexpr Vector3 kCameraDefaultPos    = {60.0f, 60.0f, 60.0f};
+constexpr Vector3 kCameraDefaultTarget = {0.0f, 0.0f, 0.0f};
+
+// Custom orbit camera: right-drag rotates around the target, Shift+right-drag
+// pans, scroll dollies, R resets. Gated against ImGui mouse-capture so
+// dragging on the inspector doesn't reach through to the 3D layer.
+void update_orbit_camera(Camera3D& camera) {
+    const bool ui_has_mouse = ImGui::GetIO().WantCaptureMouse;
+    const Vector2 dm        = GetMouseDelta();
+    const float wheel       = GetMouseWheelMove();
+    const bool shift_down   = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+
+    if (!ui_has_mouse) {
+        const bool dragging = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+                              (dm.x != 0.0f || dm.y != 0.0f);
+
+        if (dragging && shift_down) {
+            const Vector3 offset = Vector3Subtract(camera.position, camera.target);
+            const Vector3 right  = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
+            const Vector3 up     = Vector3Normalize(Vector3CrossProduct(Vector3Negate(offset), right));
+            const float scale    = Vector3Length(offset) * 0.0015f;
+            const Vector3 pan    = Vector3Add(Vector3Scale(right, -dm.x * scale),
+                                              Vector3Scale(up,    dm.y * scale));
+            camera.position = Vector3Add(camera.position, pan);
+            camera.target   = Vector3Add(camera.target,   pan);
+        } else if (dragging) {
+            Vector3 offset = Vector3Subtract(camera.position, camera.target);
+
+            // Yaw around the world up axis.
+            offset = Vector3RotateByAxisAngle(offset, camera.up, -dm.x * 0.005f);
+
+            // Pitch around the camera-right axis, clamped to avoid gimbal flip.
+            const Vector3 right = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
+            const Vector3 pitched = Vector3RotateByAxisAngle(offset, right, -dm.y * 0.005f);
+            const Vector3 dir = Vector3Normalize(pitched);
+            if (std::fabs(Vector3DotProduct(dir, camera.up)) < 0.985f) {
+                offset = pitched;
+            }
+            camera.position = Vector3Add(camera.target, offset);
+        }
+
+        if (wheel != 0.0f) {
+            Vector3 offset = Vector3Subtract(camera.position, camera.target);
+            float distance = Vector3Length(offset);
+            distance = std::clamp(distance * (1.0f - wheel * 0.1f), 2.0f, 500.0f);
+            offset = Vector3Scale(Vector3Normalize(offset), distance);
+            camera.position = Vector3Add(camera.target, offset);
+        }
+    }
+
+    if (IsKeyPressed(KEY_R)) {
+        camera.position = kCameraDefaultPos;
+        camera.target   = kCameraDefaultTarget;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -120,8 +179,8 @@ int main() {
     apply_terminal_theme();
 
     Camera3D camera{};
-    camera.position   = {60.0f, 60.0f, 60.0f};
-    camera.target     = {0.0f, 0.0f, 0.0f};
+    camera.position   = kCameraDefaultPos;
+    camera.target     = kCameraDefaultTarget;
     camera.up         = {0.0f, 1.0f, 0.0f};
     camera.fovy       = 60.0f;
     camera.projection = CAMERA_PERSPECTIVE;
@@ -135,10 +194,30 @@ int main() {
     node_material.shader = instancing_shader;
     node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
+    // Persistence: hydrate the graph from disk if a previous run saved one;
+    // otherwise generate a fresh random layout. Node id == array index for
+    // now — when deletion lands we'll need an id-to-index remap on load.
+    zg::persistence::Database db("zoigraph.db");
+    std::vector<zg::persistence::StoredNode> stored_nodes;
+    std::vector<zg::graph::Edge>             initial_edges;
+    std::vector<Vector3>                     initial_positions;
+
+    if (db.load_graph(stored_nodes, initial_edges)) {
+        initial_positions.reserve(stored_nodes.size());
+        for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
+    } else {
+        initial_positions = make_initial_positions(kNodeCount);
+        initial_edges     = make_random_edges(kNodeCount, kEdgeCount);
+        stored_nodes.reserve(initial_positions.size());
+        for (std::size_t i = 0; i < initial_positions.size(); ++i) {
+            stored_nodes.push_back({static_cast<long long>(i), initial_positions[i], "", ""});
+        }
+    }
+
     zg::graph::GraphBuffer buffer;
     zg::physics::PhysicsThread physics(
-        make_initial_positions(kNodeCount),
-        make_random_edges(kNodeCount, kEdgeCount),
+        std::move(initial_positions),
+        initial_edges,
         buffer);
     physics.start();
 
@@ -150,7 +229,7 @@ int main() {
     int selected_node = -1;
 
     while (!WindowShouldClose()) {
-        UpdateCamera(&camera, CAMERA_ORBITAL);
+        update_orbit_camera(camera);
         buffer.snapshot(positions, edges);
 
         // Raypick on left-click, but only when ImGui isn't already eating the
@@ -217,6 +296,12 @@ int main() {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");
         }
+        ImGui::Separator();
+        ImGui::TextDisabled("LEFT-CLICK         select node");
+        ImGui::TextDisabled("RIGHT-DRAG         orbit");
+        ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
+        ImGui::TextDisabled("SCROLL WHEEL       zoom");
+        ImGui::TextDisabled("R KEY              reset view");
         ImGui::End();
         rlImGuiEnd();
 
@@ -224,6 +309,19 @@ int main() {
     }
 
     physics.stop();
+
+    // Persist the converged layout. Titles and content carry through from the
+    // last load (or are empty on first run until the markdown editor lands).
+    std::vector<Vector3>         final_positions;
+    std::vector<zg::graph::Edge> final_edges;
+    buffer.snapshot(final_positions, final_edges);
+    stored_nodes.resize(final_positions.size());
+    for (std::size_t i = 0; i < final_positions.size(); ++i) {
+        stored_nodes[i].id       = static_cast<long long>(i);
+        stored_nodes[i].position = final_positions[i];
+    }
+    db.save_graph(stored_nodes, final_edges);
+
     UnloadMesh(node_mesh);
     UnloadShader(instancing_shader);
     rlImGuiShutdown();

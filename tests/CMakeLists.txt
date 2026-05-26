@@ -5,3 +5,7 @@ add_test(NAME placeholder COMMAND test_placeholder)
 add_executable(test_forces test_forces.cpp)
 target_link_libraries(test_forces PRIVATE zg_physics doctest::doctest)
 add_test(NAME forces COMMAND test_forces)
+
+add_executable(test_db test_db.cpp)
+target_link_libraries(test_db PRIVATE zg_persistence doctest::doctest)
+add_test(NAME db COMMAND test_db)
