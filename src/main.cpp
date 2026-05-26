@@ -157,8 +157,83 @@ void apply_terminal_theme() {
     c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
 }
 
-constexpr Vector3 kCameraDefaultPos    = {60.0f, 60.0f, 60.0f};
-constexpr Vector3 kCameraDefaultTarget = {0.0f, 0.0f, 0.0f};
+constexpr Vector3 kCameraDefaultPos       = {60.0f, 60.0f, 60.0f};
+constexpr Vector3 kCameraDefaultTarget    = {0.0f, 0.0f, 0.0f};
+constexpr float   kRabbitSegmentDuration  = 1.5f;  // seconds per hop
+constexpr int     kRabbitHopCount         = 3;     // directive §5.C: "through 3 random, connected edges"
+
+// Rabbit Hole macro state (directive §5.C). Driven from main.cpp because it
+// only ever exists in one instance and touches camera + selection state.
+struct RabbitHole {
+    bool                     active = false;
+    std::vector<std::size_t> path;            // node indices, length 2..(kRabbitHopCount + 1)
+    int                      segment = 0;     // current animated segment in [0, path.size() - 1)
+    float                    elapsed = 0.0f;  // seconds into the current segment
+    Vector3                  camera_offset{}; // captured at trigger time; preserved across the fly
+};
+
+// Walk `kRabbitHopCount` random connected edges starting at `start`. May
+// terminate early if a node has no neighbors — the macro just animates a
+// shorter trip in that case.
+std::vector<std::size_t> pick_rabbit_path(std::size_t start,
+                                          const std::vector<zg::graph::Edge>& edges,
+                                          std::mt19937& rng,
+                                          std::size_t max_nodes) {
+    std::vector<std::size_t> path = {start};
+    std::size_t current = start;
+    for (int hop = 0; hop < kRabbitHopCount; ++hop) {
+        std::vector<std::size_t> neighbors;
+        for (const auto& e : edges) {
+            if (e.source == current && e.target < max_nodes && e.target != current) {
+                neighbors.push_back(e.target);
+            } else if (e.target == current && e.source < max_nodes && e.source != current) {
+                neighbors.push_back(e.source);
+            }
+        }
+        if (neighbors.empty()) break;
+        std::uniform_int_distribution<std::size_t> dist(0, neighbors.size() - 1);
+        current = neighbors[dist(rng)];
+        path.push_back(current);
+    }
+    return path;
+}
+
+// Advance the macro by `dt` seconds; smoothly interpolate camera.target
+// along the current segment with smoothstep easing. Promotes selection to
+// the final node when the path completes.
+void update_rabbit_hole(RabbitHole& rh,
+                        Camera3D& camera,
+                        const std::vector<Vector3>& positions,
+                        int& selected_node,
+                        float dt) {
+    if (!rh.active) return;
+
+    rh.elapsed += dt;
+    while (rh.elapsed >= kRabbitSegmentDuration) {
+        rh.elapsed -= kRabbitSegmentDuration;
+        rh.segment++;
+        if (rh.segment >= static_cast<int>(rh.path.size()) - 1) {
+            if (!rh.path.empty() && rh.path.back() < positions.size()) {
+                camera.target   = positions[rh.path.back()];
+                camera.position = Vector3Add(camera.target, rh.camera_offset);
+                selected_node   = static_cast<int>(rh.path.back());
+            }
+            rh.active = false;
+            return;
+        }
+    }
+
+    const std::size_t a_idx = rh.path[rh.segment];
+    const std::size_t b_idx = rh.path[rh.segment + 1];
+    if (a_idx >= positions.size() || b_idx >= positions.size()) {
+        rh.active = false;
+        return;
+    }
+    const float t      = rh.elapsed / kRabbitSegmentDuration;
+    const float smooth = t * t * (3.0f - 2.0f * t);  // ease in / ease out
+    camera.target   = Vector3Lerp(positions[a_idx], positions[b_idx], smooth);
+    camera.position = Vector3Add(camera.target, rh.camera_offset);
+}
 
 // Animated jagged line for phantom-to-static connections. Subdivides the
 // straight segment into kSegments pieces and perturbs each interior point
@@ -330,6 +405,8 @@ int main() {
     std::vector<zg::telemetry::Phantom> phantoms;
     bool                             show_grid     = true;
     bool                             post_process  = true;
+    RabbitHole                       rabbit;
+    std::mt19937                     rabbit_rng(std::random_device{}());
 
     while (!WindowShouldClose()) {
         if (IsWindowResized()) {
@@ -337,7 +414,27 @@ int main() {
             scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
         }
 
-        update_orbit_camera(camera);
+        // H key triggers the Rabbit Hole macro from the currently selected
+        // node. Ignored if nothing is selected or a macro is already running.
+        if (IsKeyPressed(KEY_H) && selected_node >= 0
+            && static_cast<std::size_t>(selected_node) < positions.size()
+            && !rabbit.active) {
+            auto path = pick_rabbit_path(static_cast<std::size_t>(selected_node),
+                                          edges, rabbit_rng, positions.size());
+            if (path.size() >= 2) {
+                rabbit.active        = true;
+                rabbit.path          = std::move(path);
+                rabbit.segment       = 0;
+                rabbit.elapsed       = 0.0f;
+                rabbit.camera_offset = Vector3Subtract(camera.position, camera.target);
+            }
+        }
+
+        if (rabbit.active) {
+            update_rabbit_hole(rabbit, camera, positions, selected_node, GetFrameTime());
+        } else {
+            update_orbit_camera(camera);
+        }
         buffer.snapshot(positions, edges);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
@@ -539,6 +636,7 @@ int main() {
         ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
         ImGui::TextDisabled("SCROLL WHEEL       zoom");
         ImGui::TextDisabled("R KEY              reset view");
+        ImGui::TextDisabled("H KEY              rabbit hole");
         ImGui::End();
         rlImGuiEnd();
 
