@@ -107,6 +107,11 @@ if(NOT WIN32)
     target_link_libraries(zg_physics_thread PUBLIC pthread)
 endif()
 
+# ---- persistence (plain SQLite for now; SQLCipher swap-in later) -----------
+add_library(zg_persistence STATIC src/persistence/db.cpp)
+target_include_directories(zg_persistence PUBLIC src)
+target_link_libraries(zg_persistence PUBLIC zg_graph sqlite3 raylib)
+
 # ---- application -----------------------------------------------------------
 add_executable(zoigraph src/main.cpp)
 target_link_libraries(zoigraph PRIVATE
