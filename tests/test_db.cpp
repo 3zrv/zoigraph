@@ -189,6 +189,28 @@ TEST_CASE("db: multi-token search has AND semantics") {
     CHECK(hits[0] == 1);
 }
 
+TEST_CASE("db: update_node_text updates the row and keeps FTS in sync") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "old title", "old body"}}, {});
+
+    REQUIRE(db.search("old").size() == 1);
+    REQUIRE(db.search("new").empty());
+
+    db.update_node_text(1, "new title", "fresh content");
+
+    CHECK(db.search("old").empty());
+    REQUIRE(db.search("new").size() == 1);
+    CHECK(db.search("new")[0] == 1);
+    REQUIRE(db.search("fresh").size() == 1);
+    REQUIRE(db.search("content").size() == 1);
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    CHECK(nodes[0].title   == "new title");
+    CHECK(nodes[0].content == "fresh content");
+}
+
 TEST_CASE("db: load returns nodes ordered by id") {
     Database db(":memory:");
     db.save_graph({

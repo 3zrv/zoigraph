@@ -10,6 +10,11 @@ namespace zg::persistence {
 
 namespace {
 
+// Schema + FTS5 sync triggers. Per the SQLite FTS5 external-content recipe:
+// the triggers keep nodes_fts in lockstep with the nodes table so any future
+// INSERT / UPDATE / DELETE through SQL is reflected in the search index.
+// A rebuild runs separately on connection open to catch rows that predate
+// the triggers (e.g. DBs created before this code path existed).
 constexpr const char* kSchema = R"SQL(
 CREATE TABLE IF NOT EXISTS nodes (
     id      INTEGER PRIMARY KEY,
@@ -30,6 +35,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     content='nodes',
     content_rowid='id'
 );
+CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+    INSERT INTO nodes_fts(rowid, title, content)
+        VALUES (new.id, new.title, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, title, content)
+        VALUES ('delete', old.id, old.title, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, title, content)
+        VALUES ('delete', old.id, old.title, old.content);
+    INSERT INTO nodes_fts(rowid, title, content)
+        VALUES (new.id, new.title, new.content);
+END;
 )SQL";
 
 // Turns user input into an FTS5 prefix-match query, dropping any character
@@ -66,6 +85,10 @@ Database::Database(const std::string& path) : db_(nullptr) {
         throw std::runtime_error(msg);
     }
     exec(kSchema);
+    // Catch up the FTS index against the current nodes table. No-op if the
+    // triggers have been keeping it consistent; mandatory after a schema
+    // upgrade from a pre-FTS5 build.
+    exec("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');");
 }
 
 Database::~Database() {
@@ -175,6 +198,23 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     sqlite3_finalize(q_edges);
 
     return !nodes.empty();
+}
+
+void Database::update_node_text(long long id, const std::string& title, const std::string& content) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "UPDATE nodes SET title = ?, content = ? WHERE id = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare UPDATE nodes");
+    }
+    sqlite3_bind_text (stmt, 1, title.c_str(),   -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, content.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, id);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step UPDATE nodes");
+    }
+    sqlite3_finalize(stmt);
 }
 
 std::vector<long long> Database::search(const std::string& query) const {

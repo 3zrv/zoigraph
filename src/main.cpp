@@ -320,10 +320,19 @@ int main() {
             ImGui::Spacing();
 
             auto& sn = stored_nodes[selected_node];
-            ImGui::InputText("title", &sn.title);
+            bool text_changed = false;
+            text_changed |= ImGui::InputText("title", &sn.title);
             ImGui::TextDisabled("content (markdown)");
-            ImGui::InputTextMultiline("##content", &sn.content,
-                                      ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
+            text_changed |= ImGui::InputTextMultiline(
+                "##content", &sn.content,
+                ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
+            if (text_changed) {
+                // Persist the edit immediately so search picks it up on the
+                // next keystroke; triggers keep the FTS index in sync.
+                db.update_node_text(sn.id, sn.title, sn.content);
+                // The query may now have new hits.
+                search_hits = db.search(search_query);
+            }
 
             if (ImGui::Button("save to disk")) {
                 for (std::size_t i = 0;
