@@ -1,0 +1,11 @@
+build/
+build-*/
+out/
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+CLAUDE.md
