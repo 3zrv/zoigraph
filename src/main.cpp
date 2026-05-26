@@ -227,7 +227,9 @@ int main() {
     std::vector<Matrix>          transforms;
     transforms.reserve(kNodeCount);
 
-    int selected_node = -1;
+    int                    selected_node = -1;
+    std::string            search_query;
+    std::vector<long long> search_hits;
 
     while (!WindowShouldClose()) {
         update_orbit_camera(camera);
@@ -280,13 +282,36 @@ int main() {
 
         rlImGuiBegin();
         ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(360, 540), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(360, 600), ImGuiCond_FirstUseEver);
         ImGui::Begin("// INSPECTOR //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
         ImGui::Text("nodes   %d", static_cast<int>(positions.size()));
         ImGui::Text("edges   %d", static_cast<int>(edges.size()));
         ImGui::Text("fps     %d", GetFPS());
+        ImGui::Separator();
+
+        // Real-time FTS5 search: on each keystroke, re-query the DB and jump
+        // camera + selection to the top hit. The DB save_graph happens on
+        // edits/shutdown, so the index reflects the on-disk state — local
+        // unsaved edits to title/content won't surface until "save to disk."
+        if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
+            search_hits = db.search(search_query);
+            if (!search_hits.empty()) {
+                const auto idx = static_cast<std::size_t>(search_hits.front());
+                if (idx < positions.size()) {
+                    selected_node = static_cast<int>(idx);
+                    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
+                    camera.target = positions[idx];
+                    camera.position = Vector3Add(camera.target, offset);
+                }
+            }
+        }
+        if (!search_query.empty()) {
+            ImGui::TextDisabled("%d match%s",
+                                static_cast<int>(search_hits.size()),
+                                search_hits.size() == 1 ? "" : "es");
+        }
         ImGui::Separator();
         if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()
             && static_cast<std::size_t>(selected_node) < stored_nodes.size()) {

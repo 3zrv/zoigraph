@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <cctype>
 #include <stdexcept>
 #include <string>
 
@@ -23,7 +24,32 @@ CREATE TABLE IF NOT EXISTS edges (
     target INTEGER NOT NULL,
     weight REAL    NOT NULL DEFAULT 1.0
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    title,
+    content,
+    content='nodes',
+    content_rowid='id'
+);
 )SQL";
+
+// Turns user input into an FTS5 prefix-match query, dropping any character
+// that isn't alphanumeric so we don't have to escape FTS5 operator syntax.
+// "foo bar" -> "foo* bar*".  Returns empty if nothing survives sanitization.
+std::string to_fts_query(const std::string& q) {
+    std::string out;
+    bool in_token = false;
+    for (char c : q) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            out += c;
+            in_token = true;
+        } else if (in_token) {
+            out += "* ";
+            in_token = false;
+        }
+    }
+    if (in_token) out += "*";
+    return out;
+}
 
 void throw_sqlite(sqlite3* db, const std::string& context) {
     std::string msg = context + ": " + (db ? sqlite3_errmsg(db) : "(no db)");
@@ -100,6 +126,10 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
         }
         sqlite3_finalize(ins_edge);
 
+        // Rebuild the FTS index from the freshly-populated nodes table so
+        // search results never reference stale rows.
+        exec("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');");
+
         exec("COMMIT;");
     } catch (...) {
         exec("ROLLBACK;");
@@ -145,6 +175,25 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     sqlite3_finalize(q_edges);
 
     return !nodes.empty();
+}
+
+std::vector<long long> Database::search(const std::string& query) const {
+    const std::string fts = to_fts_query(query);
+    if (fts.empty()) return {};
+
+    std::vector<long long> ids;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank LIMIT 50;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare search");
+    }
+    sqlite3_bind_text(stmt, 1, fts.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ids.push_back(sqlite3_column_int64(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+    return ids;
 }
 
 }  // namespace zg::persistence

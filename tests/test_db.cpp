@@ -72,3 +72,57 @@ TEST_CASE("db: save_graph replaces previous contents") {
     CHECK(edges[0].source == 42);
     CHECK(edges[0].target == 42);
 }
+
+TEST_CASE("db: search returns empty for empty / non-alphanumeric input") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+    CHECK(db.search("").empty());
+    CHECK(db.search("   ").empty());
+    CHECK(db.search("!!!").empty());
+}
+
+TEST_CASE("db: search matches titles and content with prefix semantics") {
+    Database db(":memory:");
+    db.save_graph({
+        {1, {0,0,0}, "alpha node",     "investigate the supply chain"},
+        {2, {0,0,0}, "beta target",    "no overlap here"},
+        {3, {0,0,0}, "gamma vendor",   "supply route mapping"},
+    }, {});
+
+    SUBCASE("title prefix match") {
+        const auto hits = db.search("alph");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0] == 1);
+    }
+
+    SUBCASE("content match returns its node") {
+        const auto hits = db.search("investigate");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0] == 1);
+    }
+
+    SUBCASE("shared term across nodes returns both") {
+        const auto hits = db.search("supply");
+        REQUIRE(hits.size() == 2);
+        // Order is FTS rank-driven; just assert membership.
+        CHECK((hits[0] == 1 || hits[0] == 3));
+        CHECK((hits[1] == 1 || hits[1] == 3));
+        CHECK(hits[0] != hits[1]);
+    }
+
+    SUBCASE("no match returns empty") {
+        CHECK(db.search("zzzzzz").empty());
+    }
+}
+
+TEST_CASE("db: search index is rebuilt on save (no stale rows)") {
+    Database db(":memory:");
+    db.save_graph({{7, {0,0,0}, "alpha", ""}}, {});
+    REQUIRE(db.search("alpha").size() == 1);
+
+    // Replace the graph; old "alpha" should not survive.
+    db.save_graph({{99, {0,0,0}, "omega", ""}}, {});
+    CHECK(db.search("alpha").empty());
+    REQUIRE(db.search("omega").size() == 1);
+    CHECK(db.search("omega")[0] == 99);
+}
