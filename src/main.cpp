@@ -68,6 +68,46 @@ void main() {
 }
 )GLSL";
 
+// CRT post-process: chromatic aberration, scrolling scanlines, vignette.
+// Operates over fragTexCoord (0..1) from a fullscreen draw of the scene
+// RenderTexture. Resolution and time uniforms drive the per-frame look.
+constexpr const char* kCrtFS = R"GLSL(
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec2 resolution;
+uniform float time;
+
+out vec4 finalColor;
+
+void main() {
+    vec2 uv = fragTexCoord;
+    vec2 center = vec2(0.5, 0.5);
+
+    // Chromatic aberration: separate R / B sampling offsets, growing with
+    // distance from screen center.
+    vec2 ab = (uv - center) * 0.0035;
+    float r = texture(texture0, uv + ab).r;
+    float g = texture(texture0, uv).g;
+    float b = texture(texture0, uv - ab).b;
+    vec3 col = vec3(r, g, b);
+
+    // Scanlines: vertical sinusoid in pixel space, slowly scrolling.
+    float scan = sin((uv.y * resolution.y + time * 18.0) * 1.4) * 0.5 + 0.5;
+    col *= mix(0.78, 1.0, scan);
+
+    // Vignette: darken everything outside the central 60%.
+    float d = length(uv - center);
+    float vignette = smoothstep(0.85, 0.35, d);
+    col *= vignette;
+
+    finalColor = vec4(col, 1.0) * colDiffuse;
+}
+)GLSL";
+
 std::vector<Vector3> make_initial_positions(int count) {
     std::mt19937 rng(kSeed);
     std::uniform_real_distribution<float> dist(-kInitialSpread, kInitialSpread);
@@ -202,6 +242,14 @@ int main() {
     node_material.shader = instancing_shader;
     node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
+    // CRT post-process pipeline: render the 3D scene into a texture, then
+    // draw it back through the CRT shader. ImGui is layered on top of the
+    // composite so the inspector stays crisp.
+    RenderTexture2D scene_rt = LoadRenderTexture(kWidth, kHeight);
+    Shader crt_shader = LoadShaderFromMemory(nullptr, kCrtFS);
+    const int loc_crt_resolution = GetShaderLocation(crt_shader, "resolution");
+    const int loc_crt_time       = GetShaderLocation(crt_shader, "time");
+
     // Persistence: hydrate the graph from disk if a previous run saved one;
     // otherwise generate a fresh random layout. Node id == array index for
     // now — when deletion lands we'll need an id-to-index remap on load.
@@ -242,9 +290,15 @@ int main() {
     std::string                      search_query;
     std::vector<long long>           search_hits;
     std::vector<zg::telemetry::Phantom> phantoms;
-    bool                             show_grid = true;
+    bool                             show_grid     = true;
+    bool                             post_process  = true;
 
     while (!WindowShouldClose()) {
+        if (IsWindowResized()) {
+            UnloadRenderTexture(scene_rt);
+            scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+        }
+
         update_orbit_camera(camera);
         buffer.snapshot(positions, edges);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
@@ -271,7 +325,9 @@ int main() {
             transforms.push_back(MatrixTranslate(p.x, p.y, p.z));
         }
 
-        BeginDrawing();
+        // 3D pass renders into the off-screen RT so the CRT shader can post-
+        // process it before ImGui draws on top.
+        BeginTextureMode(scene_rt);
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
@@ -309,6 +365,31 @@ int main() {
             rlSetBlendMode(RL_BLEND_ALPHA);
         }
         EndMode3D();
+        EndTextureMode();
+
+        // Composite the 3D RT to the back buffer, optionally through the CRT
+        // post-process. RenderTextures store flipped vertically — pass a
+        // negative source height so the rendered image isn't upside down.
+        BeginDrawing();
+        ClearBackground(BLACK);
+
+        const float scr_w = static_cast<float>(GetScreenWidth());
+        const float scr_h = static_cast<float>(GetScreenHeight());
+        if (post_process) {
+            const Vector2 res{scr_w, scr_h};
+            const float   t = static_cast<float>(GetTime());
+            SetShaderValue(crt_shader, loc_crt_resolution, &res, SHADER_UNIFORM_VEC2);
+            SetShaderValue(crt_shader, loc_crt_time,       &t,   SHADER_UNIFORM_FLOAT);
+            BeginShaderMode(crt_shader);
+        }
+        const Rectangle src{0, 0,
+                            static_cast<float>(scene_rt.texture.width),
+                            -static_cast<float>(scene_rt.texture.height)};
+        const Rectangle dst{0, 0, scr_w, scr_h};
+        DrawTexturePro(scene_rt.texture, src, dst, {0, 0}, 0.0f, WHITE);
+        if (post_process) {
+            EndShaderMode();
+        }
 
         rlImGuiBegin();
         ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
@@ -381,6 +462,7 @@ int main() {
         }
         ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
+        ImGui::Checkbox("CRT post-process", &post_process);
         ImGui::Separator();
         ImGui::TextDisabled("LEFT-CLICK         select node");
         ImGui::TextDisabled("RIGHT-DRAG         orbit");
@@ -408,6 +490,8 @@ int main() {
     }
     db.save_graph(stored_nodes, final_edges);
 
+    UnloadRenderTexture(scene_rt);
+    UnloadShader(crt_shader);
     UnloadMesh(node_mesh);
     UnloadShader(instancing_shader);
     rlImGuiShutdown();
