@@ -242,6 +242,7 @@ int main() {
     std::string                      search_query;
     std::vector<long long>           search_hits;
     std::vector<zg::telemetry::Phantom> phantoms;
+    bool                             show_grid = true;
 
     while (!WindowShouldClose()) {
         update_orbit_camera(camera);
@@ -274,7 +275,7 @@ int main() {
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
-        DrawGrid(40, 5.0f);
+        if (show_grid) DrawGrid(40, 5.0f);
 
         if (!transforms.empty()) {
             DrawMeshInstanced(node_mesh, node_material,
@@ -378,6 +379,8 @@ int main() {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");
         }
+        ImGui::Separator();
+        ImGui::Checkbox("show grid", &show_grid);
         ImGui::Separator();
         ImGui::TextDisabled("LEFT-CLICK         select node");
         ImGui::TextDisabled("RIGHT-DRAG         orbit");
