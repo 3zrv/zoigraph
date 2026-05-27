@@ -113,6 +113,14 @@ TEST_CASE("wikilinks: very large content with mixed links and text scales") {
     CHECK(out[499] == "link499");
 }
 
+TEST_CASE("wikilinks: link with only whitespace inside [[   ]] returns whitespace target") {
+    // Lexically valid; the resolver in main.cpp drops anything that doesn't
+    // match a stored title, so a whitespace-only target naturally falls out.
+    const auto out = extract_wikilinks("[[   ]]");
+    REQUIRE(out.size() == 1);
+    CHECK(out[0] == "   ");
+}
+
 TEST_CASE("wikilinks: many links in a long content blob") {
     std::string content;
     for (int i = 0; i < 200; ++i) {

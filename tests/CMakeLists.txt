@@ -48,6 +48,14 @@ add_executable(test_wikilinks test_wikilinks.cpp)
 target_link_libraries(test_wikilinks PRIVATE zg_graph doctest::doctest)
 add_test(NAME wikilinks COMMAND test_wikilinks)
 
+add_executable(test_cluster test_cluster.cpp)
+target_link_libraries(test_cluster PRIVATE zg_graph doctest::doctest)
+add_test(NAME cluster COMMAND test_cluster)
+
+add_executable(test_timeline test_timeline.cpp)
+target_link_libraries(test_timeline PRIVATE zg_graph doctest::doctest)
+add_test(NAME timeline COMMAND test_timeline)
+
 add_executable(test_escape_wipe test_escape_wipe.cpp)
 target_link_libraries(test_escape_wipe PRIVATE zg_input doctest::doctest)
 add_test(NAME escape_wipe COMMAND test_escape_wipe)

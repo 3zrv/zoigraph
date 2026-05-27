@@ -256,6 +256,20 @@ TEST_CASE("integration: delete_project removes only the named project's files") 
     fs::remove_all(dir);
 }
 
+TEST_CASE("project_store: create + delete + create same name leaves no residue") {
+    const auto dir = tmp_dir("ping_pong");
+    fs::create_directories(dir);
+
+    for (int i = 0; i < 5; ++i) {
+        touch_db(dir / "scratch.db");
+        REQUIRE(delete_project(dir, "scratch"));
+        CHECK_FALSE(fs::exists(dir / "scratch.db"));
+    }
+    CHECK(list_projects(dir).empty());
+
+    fs::remove_all(dir);
+}
+
 TEST_CASE("project_store: write_last + list_projects survive being called many times") {
     const auto dir = tmp_dir("loop");
     fs::create_directories(dir);

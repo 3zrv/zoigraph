@@ -103,6 +103,35 @@ TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
     CHECK(edges.empty());
 }
 
+TEST_CASE("graph_buffer: positions-only snapshot under concurrent producer") {
+    // Variant of the existing torn-snapshot test using the new overload —
+    // the positions-only path must also serialize correctly.
+    GraphBuffer buf;
+    std::atomic<bool> stop{false};
+
+    std::thread producer([&]() {
+        const std::vector<Vector3> a(40, Vector3{1, 1, 1});
+        const std::vector<Vector3> b(40, Vector3{2, 2, 2});
+        bool toggle = false;
+        while (!stop.load(std::memory_order_relaxed)) {
+            buf.publish_positions(toggle ? b : a);
+            toggle = !toggle;
+        }
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(80)) {
+        std::vector<Vector3> positions;
+        buf.snapshot(positions);
+        if (!positions.empty()) {
+            const float v = positions[0].x;
+            REQUIRE((v == 1.0f || v == 2.0f));
+            for (const auto& p : positions) REQUIRE(p.x == v);
+        }
+    }
+    stop.store(true);
+    producer.join();
+}
+
 TEST_CASE("graph_buffer: positions-only snapshot doesn't touch caller's edges vector") {
     GraphBuffer buf;
     buf.publish_positions({{1, 1, 1}, {2, 2, 2}});

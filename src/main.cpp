@@ -12,10 +12,13 @@
 #include <cstddef>
 #include <ctime>
 #include <random>
+#include <set>
 #include <vector>
 
+#include "graph/cluster.h"
 #include "graph/graph_buffer.h"
 #include "graph/picks.h"
+#include "graph/timeline.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
@@ -475,6 +478,11 @@ int main() {
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
+    std::vector<std::size_t>     cluster_ids;
+    std::string                  tag_filter;
+    std::size_t                  self_idx = SIZE_MAX;  // tier=="self" lookup, SIZE_MAX if absent
+    bool                         timeline_mode  = false;
+    double                       prev_open_ts   = 0.0;  // last_open_ts before this session bumped it
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
@@ -494,6 +502,8 @@ int main() {
         stored_nodes.clear();
         edges.clear();
         positions.clear();
+        cluster_ids.clear();
+        tag_filter.clear();
 
         current_project = name;
         zg::persistence::write_last_project(kProjectsDir, name);
@@ -506,12 +516,29 @@ int main() {
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         } else {
-            // Fresh project: minimal seed graph from persistence/seed —
-            // self + alice + bob, no edges. The operator builds outward
-            // from there with the toolbar and click-to-pin.
-            auto seed = zg::persistence::make_initial_graph(unix_now());
+            // Fresh project: named seed (self + alice + bob, ids 0..2)
+            // followed by 300 random nodes (ids 3..302) populated with
+            // codename titles, stock content snippets, 0-3 random tags
+            // each, plus 200 random edges among them. Plenty of material
+            // for auto-cluster / filter / search the moment the project
+            // opens.
+            const double now_ts = unix_now();
+            auto seed = zg::persistence::make_initial_graph(now_ts);
+            auto fill = zg::persistence::make_random_fill(
+                /*node_count=*/300,
+                /*edge_count=*/200,
+                /*start_id=*/static_cast<long long>(seed.nodes.size()),
+                /*now_unix=*/now_ts,
+                /*spread=*/25.0f,
+                /*rng_seed=*/42,
+                /*with_data=*/true);
             stored_nodes = std::move(seed.nodes);
+            stored_nodes.insert(stored_nodes.end(),
+                                std::make_move_iterator(fill.nodes.begin()),
+                                std::make_move_iterator(fill.nodes.end()));
             initial_edges = std::move(seed.edges);
+            initial_edges.insert(initial_edges.end(),
+                                 fill.edges.begin(), fill.edges.end());
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         }
@@ -519,12 +546,41 @@ int main() {
         // physics. From here on these belong to main.
         positions = initial_positions;
         edges     = initial_edges;
+
+        // Find the self node (tier == "self") so touch-edges and the
+        // self-pin both have a stable anchor. Falls back to SIZE_MAX if
+        // the project doesn't have one (legacy DBs or operator-deleted).
+        self_idx = SIZE_MAX;
+        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+            if (stored_nodes[i].tier == "self") {
+                self_idx = i;
+                break;
+            }
+        }
+
         physics = std::make_unique<zg::physics::PhysicsThread>(
             std::move(initial_positions),
             initial_edges,
             buffer,
             &phantom_buffer);
         physics->start();
+
+        // Pin the self node at its current position so the rest of the
+        // graph arranges itself relative to a fixed center.
+        if (self_idx < positions.size()) {
+            physics->set_pin(self_idx, positions[self_idx]);
+        }
+
+        // Diff-since-last-open: snapshot the previous last_open_ts (used by
+        // the render to tint new/changed nodes) then bump it to now. Old
+        // projects without a stored value get prev_open_ts = 0, which
+        // suppresses the tints on first viewing.
+        prev_open_ts = db->meta_double("last_open_ts", 0.0);
+        db->set_meta_double("last_open_ts", unix_now());
+
+        // A project switch leaves any prior timeline-mode state behind —
+        // start the new session in force-directed mode.
+        timeline_mode = false;
     };
 
     // Ensure there's at least one project. If projects/ is empty, "default"
@@ -582,6 +638,27 @@ int main() {
         if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
             && positions.size() >= 3) {
             throw_bones(bones, positions, edges, camera, rabbit_rng);
+        }
+
+        // T key toggles timeline mode: every node gets pinned at a
+        // position derived from its first_seen on a horizontal axis;
+        // pressing again unpins everything (except self) so physics
+        // takes over again.
+        if (IsKeyPressed(KEY_T) && !typing && physics && !stored_nodes.empty()) {
+            timeline_mode = !timeline_mode;
+            if (timeline_mode) {
+                std::vector<double> firsts;
+                firsts.reserve(stored_nodes.size());
+                for (const auto& sn : stored_nodes) firsts.push_back(sn.first_seen);
+                const auto layout = zg::graph::compute_timeline_positions(firsts);
+                for (std::size_t i = 0; i < layout.size(); ++i) {
+                    physics->set_pin(i, layout[i]);
+                }
+            } else {
+                for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+                    if (i != self_idx) physics->clear_pin(i);
+                }
+            }
         }
 
         if (rabbit.active) {
@@ -706,6 +783,60 @@ int main() {
                 DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, ORANGE);
             } else if (tier == "phantom") {
                 DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
+            }
+
+            // Tag halo: nodes with at least one tag get an additional ring
+            // colored by a hash of the first tag's name. Layered with the
+            // tier halo above so both signals are readable.
+            if (!stored_nodes[i].tags.empty()) {
+                const std::string& tag = stored_nodes[i].tags.front();
+                const std::size_t h = std::hash<std::string>{}(tag);
+                const Color tag_col{
+                    static_cast<unsigned char>(0x60 | ((h >>  0) & 0x9F)),
+                    static_cast<unsigned char>(0x60 | ((h >>  8) & 0x9F)),
+                    static_cast<unsigned char>(0x60 | ((h >> 16) & 0x9F)),
+                    255,
+                };
+                DrawSphereWires(positions[i], kNodeRadius * 1.2f, 6, 6, tag_col);
+            }
+
+            // Cluster halo: when label-propagation has been run, draw an
+            // outer ring colored by hash of the node's cluster id. Two
+            // nodes in the same cluster share the same color.
+            if (i < cluster_ids.size()) {
+                const std::size_t h = std::hash<std::size_t>{}(cluster_ids[i] + 1);
+                const Color cluster_col{
+                    static_cast<unsigned char>(0x70 | ((h >>  4) & 0x8F)),
+                    static_cast<unsigned char>(0x70 | ((h >> 12) & 0x8F)),
+                    static_cast<unsigned char>(0x70 | ((h >> 20) & 0x8F)),
+                    255,
+                };
+                DrawSphereWires(positions[i], kNodeRadius * 1.7f, 8, 8, cluster_col);
+            }
+
+            // Tag-filter highlight: bright cyan ring on any node carrying
+            // the filtered tag. Nothing changes for non-matching nodes —
+            // this is a highlight, not a hide.
+            if (!tag_filter.empty() && i < stored_nodes.size()) {
+                const auto& tags = stored_nodes[i].tags;
+                if (std::find(tags.begin(), tags.end(), tag_filter) != tags.end()) {
+                    DrawSphereWires(positions[i], kNodeRadius * 2.2f, 10, 10, SKYBLUE);
+                }
+            }
+
+            // Diff-since-last-open tints: nodes that appeared or changed
+            // since the previous session get a temporary halo. NEW (created
+            // in this session) trumps CHANGED so the bright color wins on
+            // freshly-created nodes.
+            if (prev_open_ts > 0.0 && i < stored_nodes.size()) {
+                const auto& sn = stored_nodes[i];
+                if (sn.first_seen > prev_open_ts) {
+                    DrawSphereWires(positions[i], kNodeRadius * 1.8f, 10, 10,
+                                    Color{0, 220, 255, 220});  // bright cyan = NEW
+                } else if (sn.last_touched > prev_open_ts) {
+                    DrawSphereWires(positions[i], kNodeRadius * 1.5f, 8, 8,
+                                    Color{255, 220, 80, 180}); // pale yellow = CHANGED
+                }
             }
         }
 
@@ -953,6 +1084,41 @@ int main() {
                 db->update_node_tier(sn.id, sn.tier);
             }
 
+            // Tag chips: each existing tag renders as a small "<tag> x"
+            // button. Clicking removes the tag and persists the new set.
+            ImGui::TextDisabled("tags");
+            int remove_idx = -1;
+            for (std::size_t ti = 0; ti < sn.tags.size(); ++ti) {
+                ImGui::PushID(static_cast<int>(ti));
+                const std::string chip = sn.tags[ti] + " x";
+                if (ImGui::SmallButton(chip.c_str())) {
+                    remove_idx = static_cast<int>(ti);
+                }
+                ImGui::PopID();
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+            if (remove_idx >= 0) {
+                sn.tags.erase(sn.tags.begin() + remove_idx);
+                db->update_node_tags(sn.id, sn.tags);
+            }
+            static std::string new_tag;
+            const bool tag_submit = ImGui::InputText("add tag", &new_tag,
+                                                     ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            const bool tag_click = ImGui::SmallButton("+##tag");
+            if (tag_submit || tag_click) {
+                if (!new_tag.empty()) {
+                    // Dedup before adding so the chip row doesn't grow
+                    // visual duplicates that the DB would silently dedup.
+                    if (std::find(sn.tags.begin(), sn.tags.end(), new_tag) == sn.tags.end()) {
+                        sn.tags.push_back(new_tag);
+                        db->update_node_tags(sn.id, sn.tags);
+                    }
+                    new_tag.clear();
+                }
+            }
+
             // Timestamps — read-only display. 0 means "unknown" (legacy row
             // from before the schema migration).
             if (sn.first_seen > 0.0) {
@@ -997,6 +1163,29 @@ int main() {
                 db->update_node_text(sn.id, sn.title, sn.content, now_ts);
                 // The query may now have new hits.
                 search_hits = db->search(search_query);
+
+                // Touch-edge: any operator edit on a non-self node should
+                // create a record-of-attention from self -> that node.
+                // certainty="hearsay" so the line renders dim and doesn't
+                // visually compete with confirmed edges.
+                if (self_idx < stored_nodes.size() &&
+                    self_idx != static_cast<std::size_t>(selected_node)) {
+                    const std::size_t sel = static_cast<std::size_t>(selected_node);
+                    bool already = false;
+                    for (const auto& e : edges) {
+                        if ((e.source == self_idx && e.target == sel) ||
+                            (e.source == sel && e.target == self_idx)) {
+                            already = true;
+                            break;
+                        }
+                    }
+                    if (!already) {
+                        const zg::graph::Edge touch{
+                            self_idx, sel, "touched", "saw-at", "hearsay"};
+                        edges.push_back(touch);
+                        physics->enqueue_edge(touch);
+                    }
+                }
 
                 // Wikilinks: parse [[title]] occurrences out of the content
                 // and materialize them as edges from this node to whichever
@@ -1104,6 +1293,53 @@ int main() {
             ImGui::TextDisabled("(left-click a node)");
         }
         ImGui::Separator();
+
+        // ---- view filters ---------------------------------------------
+        // Tag filter: collect the unique set of tags across all nodes and
+        // expose them as a combo. Selecting one highlights matching nodes;
+        // "(all)" clears the filter.
+        {
+            std::vector<std::string> unique_tags = {"(all)"};
+            std::set<std::string>    seen;
+            for (const auto& sn : stored_nodes) {
+                for (const auto& t : sn.tags) {
+                    if (seen.insert(t).second) unique_tags.push_back(t);
+                }
+            }
+            int filter_idx = 0;
+            for (std::size_t k = 1; k < unique_tags.size(); ++k) {
+                if (unique_tags[k] == tag_filter) {
+                    filter_idx = static_cast<int>(k);
+                    break;
+                }
+            }
+            std::vector<const char*> filter_ptrs;
+            filter_ptrs.reserve(unique_tags.size());
+            for (const auto& s : unique_tags) filter_ptrs.push_back(s.c_str());
+            if (ImGui::Combo("filter by tag", &filter_idx,
+                             filter_ptrs.data(),
+                             static_cast<int>(filter_ptrs.size()))) {
+                tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
+            }
+        }
+
+        // Auto-cluster: button + clear button.  cluster_ids is the source of
+        // truth; populated on demand, displayed by the cluster halo above.
+        if (ImGui::Button("auto-cluster")) {
+            cluster_ids = zg::graph::label_propagation(
+                stored_nodes.size(), edges, /*max_iters=*/100);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("clear clusters")) {
+            cluster_ids.clear();
+        }
+        if (!cluster_ids.empty()) {
+            std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
+            ImGui::TextDisabled("%zu clusters across %zu nodes",
+                                unique_clusters.size(), cluster_ids.size());
+        }
+
+        ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
         ImGui::Checkbox("CRT post-process", &post_process);
         bool bh = physics->use_barnes_hut();
@@ -1186,6 +1422,84 @@ int main() {
                 ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
             }
 
+            ImGui::Separator();
+
+            // Journal-as-nodes — timestamped first-class node with tag
+            // "journal". Auto-edged from self (kind 'wrote') and also from
+            // the currently-selected node if any (kind 'concerns') so the
+            // entry threads itself into whatever the operator was looking
+            // at when they wrote it. Memex trails by accident.
+            static std::string tb_journal_text;
+            static std::string tb_journal_msg;
+            ImGui::TextDisabled("journal entry");
+            ImGui::InputTextMultiline("##tb_journal", &tb_journal_text,
+                                      ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4));
+            if (ImGui::IsItemEdited()) tb_journal_msg.clear();
+            if (ImGui::Button("save journal")) {
+                if (tb_journal_text.empty()) {
+                    tb_journal_msg = "entry is empty";
+                } else if (!physics || !db) {
+                    tb_journal_msg = "no active project";
+                } else {
+                    const double now_ts = unix_now();
+                    const std::time_t tt = static_cast<std::time_t>(now_ts);
+                    char tbuf[32];
+                    std::strftime(tbuf, sizeof(tbuf), "journal-%Y%m%d-%H%M%S",
+                                  std::localtime(&tt));
+                    const long long new_id = static_cast<long long>(stored_nodes.size());
+                    // Position near self so journal entries cluster around
+                    // the operator; small angular offset by id keeps them
+                    // from overlapping each other.
+                    const float ang = 0.5f * static_cast<float>(new_id);
+                    Vector3 anchor{0.0f, 0.0f, 0.0f};
+                    if (self_idx < positions.size()) anchor = positions[self_idx];
+                    const Vector3 spawn{
+                        anchor.x + 3.0f * std::cos(ang),
+                        anchor.y + 1.0f + 0.3f * static_cast<float>(new_id % 5),
+                        anchor.z + 3.0f * std::sin(ang),
+                    };
+                    zg::persistence::StoredNode jn{};
+                    jn.id           = new_id;
+                    jn.position     = spawn;
+                    jn.title        = tbuf;
+                    jn.content      = tb_journal_text;
+                    jn.first_seen   = now_ts;
+                    jn.last_touched = now_ts;
+                    jn.tier         = "confirmed";
+                    jn.tags         = {"journal"};
+                    stored_nodes.push_back(std::move(jn));
+                    physics->enqueue_node(spawn);
+
+                    // self -> journal edge (kind "wrote")
+                    if (self_idx < stored_nodes.size()) {
+                        const zg::graph::Edge e_self{
+                            self_idx, static_cast<std::size_t>(new_id),
+                            "wrote", "knows", "confirmed"};
+                        edges.push_back(e_self);
+                        physics->enqueue_edge(e_self);
+                    }
+                    // journal -> selected edge (kind "concerns") if a node
+                    // is currently selected and isn't the journal itself.
+                    if (selected_node >= 0 &&
+                        static_cast<std::size_t>(selected_node) < stored_nodes.size() &&
+                        static_cast<std::size_t>(selected_node) != static_cast<std::size_t>(new_id)) {
+                        const zg::graph::Edge e_about{
+                            static_cast<std::size_t>(new_id),
+                            static_cast<std::size_t>(selected_node),
+                            "concerns", "saw-at", "confirmed"};
+                        edges.push_back(e_about);
+                        physics->enqueue_edge(e_about);
+                    }
+
+                    db->save_graph(stored_nodes, edges);
+                    tb_journal_msg = "saved " + std::string(tbuf);
+                    tb_journal_text.clear();
+                }
+            }
+            if (!tb_journal_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_journal_msg.c_str());
+            }
+
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Help")) {
@@ -1196,6 +1510,7 @@ int main() {
             ImGui::TextDisabled("R KEY              reset view");
             ImGui::TextDisabled("H KEY              rabbit hole");
             ImGui::TextDisabled("B KEY              throw the bones");
+            ImGui::TextDisabled("T KEY              timeline collapse");
             ImGui::TextDisabled("ESC x 3            wipe + exit");
             ImGui::EndTabItem();
         }

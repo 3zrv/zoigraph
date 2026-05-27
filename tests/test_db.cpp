@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -570,6 +571,193 @@ TEST_CASE("db: roundtrip preserves edges with negative-looking large weights (le
         CHECK(out_edges[i].source == in_edges[i].source);
         CHECK(out_edges[i].target == in_edges[i].target);
     }
+}
+
+TEST_CASE("db: opening the same file twice doesn't re-migrate or corrupt data") {
+    // Migration is gated on column existence; opening an already-migrated
+    // file should be idempotent.
+    const std::string path = "/tmp/zg_idempotent_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    {
+        Database db(path);
+        db.save_graph({{1, {0,0,0}, "stable", "body"}}, {{1, 1, "self-link", "knows", "confirmed"}});
+    }
+    {
+        Database db(path);  // second open, should not re-migrate
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].title == "stable");
+        REQUIRE(edges.size() == 1);
+        CHECK(edges[0].label == "self-link");
+    }
+    {
+        Database db(path);  // third open
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        CHECK(nodes[0].title == "stable");
+    }
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("db: edge label of 4 KB roundtrips byte-exact") {
+    Database db(":memory:");
+    std::string huge_label(4096, 'L');
+    db.save_graph(
+        {{1, {0,0,0}, "a", ""}, {2, {0,0,0}, "b", ""}},
+        {{1, 2, huge_label, "knows", "confirmed"}});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].label.size() == 4096);
+    CHECK(edges[0].label == huge_label);
+}
+
+TEST_CASE("db: node tags roundtrip through save_graph and load_graph") {
+    Database db(":memory:");
+    StoredNode n1{};
+    n1.id = 1; n1.position = {0,0,0}; n1.title = "alpha";
+    n1.tags = {"subject", "asset"};
+    StoredNode n2{};
+    n2.id = 2; n2.position = {0,0,0}; n2.title = "beta";
+    n2.tags = {};  // no tags
+    StoredNode n3{};
+    n3.id = 3; n3.position = {0,0,0}; n3.title = "gamma";
+    n3.tags = {"hostile"};
+
+    db.save_graph({n1, n2, n3}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 3);
+    CHECK(out[0].tags.size() == 2);
+    CHECK((out[0].tags[0] == "subject" || out[0].tags[0] == "asset"));
+    CHECK(out[1].tags.empty());
+    REQUIRE(out[2].tags.size() == 1);
+    CHECK(out[2].tags[0] == "hostile");
+}
+
+TEST_CASE("db: duplicate tags within a node's list collapse to one stored row") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"asset", "asset", "asset"};  // 3 copies
+    db.save_graph({n}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    // The PK (node_id, tag) collapses dup inserts; loaded set has just one.
+    CHECK(out[0].tags.size() == 1);
+    CHECK(out[0].tags[0] == "asset");
+}
+
+TEST_CASE("db: update_node_tags atomically replaces the tag set") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"old1", "old2"};
+    db.save_graph({n}, {});
+
+    db.update_node_tags(1, {"new1", "new2", "new3"});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].tags.size() == 3);
+    std::sort(out[0].tags.begin(), out[0].tags.end());
+    CHECK(out[0].tags[0] == "new1");
+    CHECK(out[0].tags[1] == "new2");
+    CHECK(out[0].tags[2] == "new3");
+}
+
+TEST_CASE("db: update_node_tags with empty vector clears all tags") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"keep", "kill"};
+    db.save_graph({n}, {});
+
+    db.update_node_tags(1, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    CHECK(out[0].tags.empty());
+}
+
+TEST_CASE("db: tags survive a legacy DB without node_tags table (migration creates it)") {
+    const std::string path = "/tmp/zg_tags_migrate_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    // Legacy schema: no node_tags.
+    {
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        sqlite3_exec(raw,
+            "CREATE TABLE nodes ("
+            "  id INTEGER PRIMARY KEY, x REAL, y REAL, z REAL,"
+            "  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '');"
+            "INSERT INTO nodes (id, x, y, z, title, content) VALUES (1, 0, 0, 0, 'legacy', '');",
+            nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+    }
+
+    Database db(path);
+    db.update_node_tags(1, {"freshly-added"});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].tags.size() == 1);
+    CHECK(out[0].tags[0] == "freshly-added");
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("db: meta_double returns fallback when key is missing") {
+    Database db(":memory:");
+    CHECK(db.meta_double("never-set", -1.0) == doctest::Approx(-1.0));
+    CHECK(db.meta_double("never-set",  0.0) == doctest::Approx( 0.0));
+}
+
+TEST_CASE("db: meta_double roundtrips through set_meta_double") {
+    Database db(":memory:");
+    db.set_meta_double("last_open_ts", 1735689600.5);
+    CHECK(db.meta_double("last_open_ts", 0.0) == doctest::Approx(1735689600.5));
+}
+
+TEST_CASE("db: set_meta_double upserts (second write overwrites)") {
+    Database db(":memory:");
+    db.set_meta_double("k", 1.0);
+    db.set_meta_double("k", 2.0);
+    db.set_meta_double("k", 3.0);
+    CHECK(db.meta_double("k", -1.0) == doctest::Approx(3.0));
+}
+
+TEST_CASE("db: meta survives close + reopen against a real file") {
+    const std::string path = "/tmp/zg_meta_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    {
+        Database db(path);
+        db.set_meta_double("last_open_ts", 9876.5);
+    }
+    {
+        Database db(path);  // fresh connection
+        CHECK(db.meta_double("last_open_ts", 0.0) == doctest::Approx(9876.5));
+    }
+    std::remove(path.c_str());
 }
 
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {

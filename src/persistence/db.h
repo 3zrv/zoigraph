@@ -12,13 +12,14 @@ struct sqlite3;
 namespace zg::persistence {
 
 struct StoredNode {
-    long long   id;
-    Vector3     position;
-    std::string title;
-    std::string content;
-    double      first_seen   = 0.0;            // Unix seconds; 0 == unknown
-    double      last_touched = 0.0;            // Unix seconds; bumped on edits
-    std::string tier         = "confirmed";    // "confirmed" / "suspected" / "phantom"
+    long long                id;
+    Vector3                  position;
+    std::string              title;
+    std::string              content;
+    double                   first_seen   = 0.0;          // Unix seconds; 0 == unknown
+    double                   last_touched = 0.0;          // Unix seconds; bumped on edits
+    std::string              tier         = "confirmed";  // "confirmed" / "suspected" / "phantom" / "self"
+    std::vector<std::string> tags         = {};           // operator-extensible: subject / asset / hostile / ...
 };
 
 // Thin wrapper around a SQLite connection. The schema is the eventual home
@@ -57,6 +58,17 @@ public:
 
     // Updates only the tier field on one node. No FTS impact.
     void update_node_tier(long long id, const std::string& tier);
+
+    // Replaces the tag set for one node atomically: deletes every existing
+    // node_tags row for `id` and inserts the new set. No-op if the id
+    // doesn't exist (no node + no tags).
+    void update_node_tags(long long id, const std::vector<std::string>& tags);
+
+    // Generic key-value metadata for project-wide settings (last open
+    // timestamp, etc.). meta_double returns `fallback` if the key is
+    // missing or fails to parse as a double; set_meta_double upserts.
+    double meta_double(const std::string& key, double fallback) const;
+    void   set_meta_double(const std::string& key, double value);
 
     // Updates label/kind/certainty on the single edge identified by
     // (source, target). Silently does nothing if no matching edge exists.

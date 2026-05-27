@@ -286,6 +286,28 @@ TEST_CASE("phantom_buffer: add after expire restores a populated snapshot") {
     CHECK(out[0].id == 2);
 }
 
+TEST_CASE("phantom_buffer: many add/remove cycles end in the expected final state") {
+    PhantomBuffer buf;
+    for (long long i = 0; i < 50; ++i) {
+        Phantom p{};
+        p.id = i;
+        p.spawn_time = 100.0;
+        buf.add(p);
+    }
+    REQUIRE(buf.size() == 50);
+
+    // Remove every even id.
+    for (long long i = 0; i < 50; i += 2) buf.remove(i);
+    CHECK(buf.size() == 25);
+
+    std::vector<Phantom> out;
+    buf.snapshot_and_expire(out, 60.0f, 100.5);
+    REQUIRE(out.size() == 25);
+    for (const auto& p : out) {
+        CHECK(p.id % 2 == 1);  // every survivor is odd
+    }
+}
+
 TEST_CASE("phantom_buffer: clear() followed by add() leaves only the new phantom") {
     PhantomBuffer buf;
     for (int i = 0; i < 3; ++i) {

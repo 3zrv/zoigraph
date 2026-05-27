@@ -5,6 +5,7 @@
 #include <cctype>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace zg::persistence {
 
@@ -34,6 +35,15 @@ CREATE TABLE IF NOT EXISTS edges (
     label     TEXT    NOT NULL DEFAULT '',
     kind      TEXT    NOT NULL DEFAULT '',
     certainty TEXT    NOT NULL DEFAULT 'confirmed'
+);
+CREATE TABLE IF NOT EXISTS node_tags (
+    node_id INTEGER NOT NULL,
+    tag     TEXT    NOT NULL,
+    PRIMARY KEY (node_id, tag)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
@@ -200,6 +210,29 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
         }
         sqlite3_finalize(ins_edge);
 
+        // Tags: rewrite the entire node_tags table to match the in-memory
+        // state. INSERT OR IGNORE so duplicate tags within a node's list
+        // collapse silently rather than erroring on the PK.
+        exec("DELETE FROM node_tags;");
+        sqlite3_stmt* ins_tag = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?);",
+                -1, &ins_tag, nullptr) != SQLITE_OK) {
+            throw_sqlite(db_, "prepare INSERT node_tags");
+        }
+        for (const StoredNode& n : nodes) {
+            for (const std::string& tag : n.tags) {
+                sqlite3_bind_int64(ins_tag, 1, n.id);
+                sqlite3_bind_text (ins_tag, 2, tag.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(ins_tag) != SQLITE_DONE) {
+                    sqlite3_finalize(ins_tag);
+                    throw_sqlite(db_, "step INSERT node_tags");
+                }
+                sqlite3_reset(ins_tag);
+            }
+        }
+        sqlite3_finalize(ins_tag);
+
         // Rebuild the FTS index from the freshly-populated nodes table so
         // search results never reference stale rows.
         exec("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');");
@@ -256,6 +289,31 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     }
     sqlite3_finalize(q_edges);
 
+    // Dispatch tags back onto their parent nodes via an id -> index map so
+    // a single pass over node_tags handles arbitrary id values, not just
+    // contiguous 0..N-1.
+    if (!nodes.empty()) {
+        std::unordered_map<long long, std::size_t> id_to_idx;
+        id_to_idx.reserve(nodes.size());
+        for (std::size_t i = 0; i < nodes.size(); ++i) id_to_idx[nodes[i].id] = i;
+
+        sqlite3_stmt* q_tags = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT node_id, tag FROM node_tags;",
+                -1, &q_tags, nullptr) != SQLITE_OK) {
+            throw_sqlite(db_, "prepare SELECT node_tags");
+        }
+        while (sqlite3_step(q_tags) == SQLITE_ROW) {
+            const long long nid = sqlite3_column_int64(q_tags, 0);
+            const unsigned char* t = sqlite3_column_text(q_tags, 1);
+            if (!t) continue;
+            auto it = id_to_idx.find(nid);
+            if (it == id_to_idx.end()) continue;  // orphan tag, drop
+            nodes[it->second].tags.emplace_back(reinterpret_cast<const char*>(t));
+        }
+        sqlite3_finalize(q_tags);
+    }
+
     return !nodes.empty();
 }
 
@@ -299,6 +357,86 @@ void Database::update_edge(std::size_t source, std::size_t target,
         throw_sqlite(db_, "step UPDATE edges");
     }
     sqlite3_finalize(stmt);
+}
+
+double Database::meta_double(const std::string& key, double fallback) const {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "SELECT value FROM meta WHERE key = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        return fallback;
+    }
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    double result = fallback;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (const unsigned char* v = sqlite3_column_text(stmt, 0)) {
+            try {
+                result = std::stod(reinterpret_cast<const char*>(v));
+            } catch (...) {
+                result = fallback;
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::set_meta_double(const std::string& key, double value) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare INSERT meta");
+    }
+    sqlite3_bind_text(stmt, 1, key.c_str(),                  -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, std::to_string(value).c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step INSERT meta");
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::update_node_tags(long long id, const std::vector<std::string>& tags) {
+    exec("BEGIN IMMEDIATE;");
+    try {
+        sqlite3_stmt* del = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "DELETE FROM node_tags WHERE node_id = ?;",
+                -1, &del, nullptr) != SQLITE_OK) {
+            throw_sqlite(db_, "prepare DELETE node_tags");
+        }
+        sqlite3_bind_int64(del, 1, id);
+        if (sqlite3_step(del) != SQLITE_DONE) {
+            sqlite3_finalize(del);
+            throw_sqlite(db_, "step DELETE node_tags");
+        }
+        sqlite3_finalize(del);
+
+        if (!tags.empty()) {
+            sqlite3_stmt* ins = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                    "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?);",
+                    -1, &ins, nullptr) != SQLITE_OK) {
+                throw_sqlite(db_, "prepare INSERT node_tags");
+            }
+            for (const std::string& tag : tags) {
+                sqlite3_bind_int64(ins, 1, id);
+                sqlite3_bind_text (ins, 2, tag.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(ins) != SQLITE_DONE) {
+                    sqlite3_finalize(ins);
+                    throw_sqlite(db_, "step INSERT node_tags");
+                }
+                sqlite3_reset(ins);
+            }
+            sqlite3_finalize(ins);
+        }
+        exec("COMMIT;");
+    } catch (...) {
+        exec("ROLLBACK;");
+        throw;
+    }
 }
 
 void Database::update_node_tier(long long id, const std::string& tier) {

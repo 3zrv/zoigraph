@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -194,6 +195,32 @@ TEST_CASE("integrator: phantoms do not accumulate reaction forces themselves") {
     CHECK(phantoms[0].y == phantom_before.y);
     CHECK(phantoms[0].z == phantom_before.z);
     CHECK(positions[0].x < 0.0f);  // static node still moved
+}
+
+TEST_CASE("integrator: 50 randomly-seeded nodes never exceed max_speed under heavy repulsion") {
+    // Stress test: many nodes packed close together with strong repulsion.
+    // The velocity clamp must keep every component within max_speed even
+    // when the integrator sees huge forces in early ticks.
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> d(-2.0f, 2.0f);
+    std::vector<Vector3> positions, velocities;
+    for (int i = 0; i < 50; ++i) {
+        positions.push_back({d(rng), d(rng), d(rng)});
+        velocities.push_back({0, 0, 0});
+    }
+    SimParams params{};
+    params.repulsion_k = 200.0f;
+    params.max_speed   = 20.0f;
+    params.damping     = 0.95f;
+    params.dt          = 0.05f;
+
+    for (int t = 0; t < 50; ++t) {
+        integrate_step(positions, velocities, {}, params);
+    }
+    for (const auto& v : velocities) {
+        const float speed = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        CHECK(speed <= params.max_speed + 1e-3f);
+    }
 }
 
 TEST_CASE("integrator: damping = 1.0 preserves velocity indefinitely under no forces") {
@@ -515,6 +542,67 @@ TEST_CASE("PhysicsThread: set_use_barnes_hut toggles cleanly at runtime") {
     buffer.snapshot(positions, edges);
     physics.stop();
     REQUIRE(positions.size() == 3);
+}
+
+TEST_CASE("PhysicsThread: set_pin freezes a node at its anchor across many ticks") {
+    // Two nodes near each other with strong repulsion. The pinned one
+    // should not move; the other should be shoved away.
+    GraphBuffer buffer;
+    SimParams p{};
+    p.repulsion_k = 100.0f;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}}, {}, buffer, nullptr, p);
+    physics.set_pin(0, {0.0f, 0.0f, 0.0f});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    // Pinned node sits at the anchor.
+    CHECK(positions[0].x == doctest::Approx(0.0f).epsilon(0.001f));
+    CHECK(positions[0].y == doctest::Approx(0.0f).epsilon(0.001f));
+    CHECK(positions[0].z == doctest::Approx(0.0f).epsilon(0.001f));
+    // Other node was shoved away.
+    CHECK(std::fabs(positions[1].x) > 0.5f);
+}
+
+TEST_CASE("PhysicsThread: clear_pin lets a previously-pinned node move again") {
+    GraphBuffer buffer;
+    SimParams p{};
+    p.repulsion_k = 100.0f;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}}, {}, buffer, nullptr, p);
+    physics.set_pin(0, {0.0f, 0.0f, 0.0f});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    physics.clear_pin(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    // After clearing the pin, the formerly-pinned node has had time to
+    // drift under continued repulsion from the other.
+    CHECK(std::fabs(positions[0].x) > 1e-3f);
+}
+
+TEST_CASE("PhysicsThread: set_pin with out-of-bounds index is a silent no-op") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+    physics.set_pin(999, {7.0f, 7.0f, 7.0f});  // node doesn't exist
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+    REQUIRE(positions.size() == 1);  // no crash, no spurious additions
 }
 
 TEST_CASE("PhysicsThread: enqueue_edge appears in the buffer's edge snapshot") {

@@ -119,6 +119,8 @@ add_library(zg_graph STATIC
     src/graph/graph_buffer.cpp
     src/graph/picks.cpp
     src/graph/wikilinks.cpp
+    src/graph/cluster.cpp
+    src/graph/timeline.cpp
 )
 target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
