@@ -30,6 +30,8 @@
 #include "render/draw.h"
 #include "render/imgui_theme.h"
 #include "render/shaders.h"
+#include "ui/bones_panel.h"
+#include "ui/help_tab.h"
 #include "ui/inspector_tab.h"
 #include "ui/toolbar_tab.h"
 #include "persistence/db.h"
@@ -598,66 +600,14 @@ int main() {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Help")) {
-            ImGui::TextDisabled("LEFT-CLICK         select node");
-            ImGui::TextDisabled("RIGHT-DRAG         orbit");
-            ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
-            ImGui::TextDisabled("SCROLL WHEEL       zoom");
-            ImGui::TextDisabled("R KEY              reset view");
-            ImGui::TextDisabled("H KEY              rabbit hole");
-            ImGui::TextDisabled("B KEY              throw the bones");
-            ImGui::TextDisabled("T KEY              timeline collapse");
-            ImGui::TextDisabled("ESC x 3            wipe + exit");
+            zg::ui::render_help_tab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
         }
         ImGui::End();
 
-        // Bones scratch panel — separate ImGui window, opens when a throw
-        // selects a triple and stays open until the operator closes it.
-        // Each chosen-node row is a Selectable: clicking it smooth-flies the
-        // camera to that node and updates the inspector selection.
-        if (bones.panel_open) {
-            // Place the bones panel next to the main window if there's room,
-            // otherwise stack it below so it stays fully on-screen.
-            const float scr_w = static_cast<float>(GetScreenWidth());
-            const float scr_h = static_cast<float>(GetScreenHeight());
-            const bool  side_by_side = scr_w > (main_w + 360.0f + 48.0f);
-            const ImVec2 bones_pos  = side_by_side
-                ? ImVec2(main_w + 32.0f, 16.0f)
-                : ImVec2(16.0f, std::min(main_h + 32.0f, scr_h - 200.0f));
-            const ImVec2 bones_size{
-                std::min(360.0f, scr_w - bones_pos.x - 16.0f),
-                std::min(320.0f, scr_h - bones_pos.y - 16.0f),
-            };
-            ImGui::SetNextWindowPos (bones_pos,  ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(bones_size, ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
-                ImGui::TextDisabled("what connects these?  (click a node to travel)");
-                ImGui::Separator();
-                for (std::size_t slot = 0; slot < bones.chosen.size(); ++slot) {
-                    const auto i = bones.chosen[slot];
-                    if (i >= stored_nodes.size()) continue;
-                    const auto& sn = stored_nodes[i];
-                    char row[320];
-                    std::snprintf(row, sizeof(row), "[%zu] %s##bones-pick-%zu",
-                                  i,
-                                  sn.title.empty() ? "(untitled)" : sn.title.c_str(),
-                                  slot);
-                    if (ImGui::Selectable(row)) {
-                        bones_fly_to_node(bones, i, positions, camera);
-                        selected_node = static_cast<int>(i);
-                    }
-                }
-                ImGui::Separator();
-                ImGui::InputTextMultiline("##bones-scratch", &bones.scratch,
-                                          ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10));
-                if (ImGui::Button("throw again")) {
-                    throw_bones(bones, positions, edges, camera, rabbit_rng);
-                }
-            }
-            ImGui::End();
-        }
+        zg::ui::render_bones_panel(bones, session, camera, main_w, main_h, rabbit_rng);
 
         rlImGuiEnd();
 
