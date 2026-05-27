@@ -1045,7 +1045,11 @@ int main() {
             }
             ImGui::Text("edges (%d incident)", incident_count);
 
-            static const char* kKinds[]       = {"", "knows", "owns", "saw-at", "shell-of", "suspected"};
+            // Kind picker: ImGui::Combo with an empty-string entry renders a
+            // blank, unclickable row. Display "(none)" but store "" in the
+            // Edge.kind field so the on-disk schema stays unchanged.
+            static const char* kKindLabels[] = {"(none)", "knows", "owns", "saw-at", "shell-of", "suspected"};
+            static const char* kKindValues[] = {"",       "knows", "owns", "saw-at", "shell-of", "suspected"};
             static const char* kCertainties[] = {"confirmed", "suspected", "hearsay", "phantom"};
             for (std::size_t i = 0; i < edges.size(); ++i) {
                 auto& e = edges[i];
@@ -1061,9 +1065,9 @@ int main() {
                     bool changed = false;
                     changed |= ImGui::InputText("label", &e.label);
                     int kind_idx = 0;
-                    for (int k = 0; k < 6; ++k) if (e.kind == kKinds[k]) { kind_idx = k; break; }
-                    if (ImGui::Combo("kind", &kind_idx, kKinds, 6)) {
-                        e.kind = kKinds[kind_idx];
+                    for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }
+                    if (ImGui::Combo("kind", &kind_idx, kKindLabels, 6)) {
+                        e.kind = kKindValues[kind_idx];
                         changed = true;
                     }
                     int c_idx = 0;
@@ -1165,24 +1169,7 @@ int main() {
 
             ImGui::EndTabItem();
         }
-        ImGui::EndTabBar();
-        }
-        ImGui::End();
-
-        // Control glossary — separate window, bottom-right of the screen by
-        // default so it sits out of the way of the main panel. Clamped to
-        // fit, no resize. Operator can drag it elsewhere if they want.
-        {
-            const float scr_w  = static_cast<float>(GetScreenWidth());
-            const float scr_h  = static_cast<float>(GetScreenHeight());
-            const float help_w = std::min(300.0f, scr_w - 32.0f);
-            const float help_h = std::min(220.0f, scr_h - 32.0f);
-            const ImVec2 help_pos(
-                std::max(16.0f, scr_w - help_w - 16.0f),
-                std::max(16.0f, scr_h - help_h - 16.0f));
-            ImGui::SetNextWindowPos (help_pos,                ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(help_w, help_h),  ImGuiCond_Always);
-            ImGui::Begin("// HELP //", nullptr, ImGuiWindowFlags_NoResize);
+        if (ImGui::BeginTabItem("Help")) {
             ImGui::TextDisabled("LEFT-CLICK         select node");
             ImGui::TextDisabled("RIGHT-DRAG         orbit");
             ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
@@ -1191,8 +1178,11 @@ int main() {
             ImGui::TextDisabled("H KEY              rabbit hole");
             ImGui::TextDisabled("B KEY              throw the bones");
             ImGui::TextDisabled("ESC x 3            wipe + exit");
-            ImGui::End();
+            ImGui::EndTabItem();
         }
+        ImGui::EndTabBar();
+        }
+        ImGui::End();
 
         // Bones scratch panel — separate ImGui window, opens when a throw
         // selects a triple and stays open until the operator closes it.
