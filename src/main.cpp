@@ -22,6 +22,7 @@
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
+#include "macros/rabbit_hole.h"
 #include "render/camera.h"
 #include "render/draw.h"
 #include "render/imgui_theme.h"
@@ -59,19 +60,9 @@ double unix_now() {
 using zg::render::kCameraDefaultPos;
 using zg::render::kCameraDefaultTarget;
 using zg::render::update_orbit_camera;
-
-constexpr float   kRabbitSegmentDuration  = 1.5f;  // seconds per hop
-constexpr int     kRabbitHopCount         = 3;     // directive §5.C: "through 3 random, connected edges"
-
-// Rabbit Hole macro state (directive §5.C). Driven from main.cpp because it
-// only ever exists in one instance and touches camera + selection state.
-struct RabbitHole {
-    bool                     active = false;
-    std::vector<std::size_t> path;            // node indices, length 2..(kRabbitHopCount + 1)
-    int                      segment = 0;     // current animated segment in [0, path.size() - 1)
-    float                    elapsed = 0.0f;  // seconds into the current segment
-    Vector3                  camera_offset{}; // captured at trigger time; preserved across the fly
-};
+using zg::macros::RabbitHole;
+using zg::macros::pick_rabbit_path;
+using zg::macros::update_rabbit_hole;
 
 // ---- Throw-the-bones macro -------------------------------------------------
 // Picks three weakly-connected nodes, smoothly flies the camera to frame all
@@ -167,69 +158,6 @@ void bones_fly_to_node(Bones& b, std::size_t node_idx,
     b.elapsed       = 0.0f;
     b.duration      = 0.6f;  // snappier than the initial throw
     b.active        = true;
-}
-
-// Walk `kRabbitHopCount` random connected edges starting at `start`. May
-// terminate early if a node has no neighbors — the macro just animates a
-// shorter trip in that case.
-std::vector<std::size_t> pick_rabbit_path(std::size_t start,
-                                          const std::vector<zg::graph::Edge>& edges,
-                                          std::mt19937& rng,
-                                          std::size_t max_nodes) {
-    std::vector<std::size_t> path = {start};
-    std::size_t current = start;
-    for (int hop = 0; hop < kRabbitHopCount; ++hop) {
-        std::vector<std::size_t> neighbors;
-        for (const auto& e : edges) {
-            if (e.source == current && e.target < max_nodes && e.target != current) {
-                neighbors.push_back(e.target);
-            } else if (e.target == current && e.source < max_nodes && e.source != current) {
-                neighbors.push_back(e.source);
-            }
-        }
-        if (neighbors.empty()) break;
-        std::uniform_int_distribution<std::size_t> dist(0, neighbors.size() - 1);
-        current = neighbors[dist(rng)];
-        path.push_back(current);
-    }
-    return path;
-}
-
-// Advance the macro by `dt` seconds; smoothly interpolate camera.target
-// along the current segment with smoothstep easing. Promotes selection to
-// the final node when the path completes.
-void update_rabbit_hole(RabbitHole& rh,
-                        Camera3D& camera,
-                        const std::vector<Vector3>& positions,
-                        int& selected_node,
-                        float dt) {
-    if (!rh.active) return;
-
-    rh.elapsed += dt;
-    while (rh.elapsed >= kRabbitSegmentDuration) {
-        rh.elapsed -= kRabbitSegmentDuration;
-        rh.segment++;
-        if (rh.segment >= static_cast<int>(rh.path.size()) - 1) {
-            if (!rh.path.empty() && rh.path.back() < positions.size()) {
-                camera.target   = positions[rh.path.back()];
-                camera.position = Vector3Add(camera.target, rh.camera_offset);
-                selected_node   = static_cast<int>(rh.path.back());
-            }
-            rh.active = false;
-            return;
-        }
-    }
-
-    const std::size_t a_idx = rh.path[rh.segment];
-    const std::size_t b_idx = rh.path[rh.segment + 1];
-    if (a_idx >= positions.size() || b_idx >= positions.size()) {
-        rh.active = false;
-        return;
-    }
-    const float t      = rh.elapsed / kRabbitSegmentDuration;
-    const float smooth = t * t * (3.0f - 2.0f * t);  // ease in / ease out
-    camera.target   = Vector3Lerp(positions[a_idx], positions[b_idx], smooth);
-    camera.position = Vector3Add(camera.target, rh.camera_offset);
 }
 
 }  // namespace

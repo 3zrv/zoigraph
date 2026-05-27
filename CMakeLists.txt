@@ -110,6 +110,11 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
+add_library(zg_macros STATIC src/macros/rabbit_hole.cpp)
+target_include_directories(zg_macros PUBLIC src)
+target_link_libraries(zg_macros PUBLIC zg_graph raylib)
+
 # ---- render (shaders + imgui theme + camera + small draw helpers) ----------
 add_library(zg_render STATIC
     src/render/imgui_theme.cpp
@@ -175,6 +180,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_telemetry
     zg_input
     zg_render
+    zg_macros
     raylib
     rlimgui
     imgui
