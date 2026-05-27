@@ -13,4 +13,12 @@ bool EscapeWipe::record(double t, double window) {
     return (hi - lo) <= window;
 }
 
+int EscapeWipe::count_recent(double now, double window) const {
+    int n = 0;
+    for (double t : stamps) {
+        if (now - t <= window) ++n;
+    }
+    return n;
+}
+
 }  // namespace zg::input

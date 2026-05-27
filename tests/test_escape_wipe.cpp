@@ -57,6 +57,30 @@ TEST_CASE("escape_wipe: triple after a long pause requires three new presses") {
     CHECK     (w.record(300.4, 1.0));
 }
 
+TEST_CASE("escape_wipe: count_recent reflects in-window stamps") {
+    EscapeWipe w;
+    CHECK(w.count_recent(100.0, 1.0) == 0);
+    w.record(100.0, 1.0);
+    CHECK(w.count_recent(100.1, 1.0) == 1);
+    w.record(100.2, 1.0);
+    CHECK(w.count_recent(100.3, 1.0) == 2);
+    w.record(100.4, 1.0);
+    CHECK(w.count_recent(100.5, 1.0) == 3);
+}
+
+TEST_CASE("escape_wipe: count_recent decays as stamps age out of the window") {
+    EscapeWipe w;
+    w.record(100.0, 1.0);
+    w.record(100.2, 1.0);
+    w.record(100.4, 1.0);
+    // At now=101.3 with window=1.0, only 100.4 is still within 1.0s.
+    CHECK(w.count_recent(101.3, 1.0) == 1);
+    // At now=101.1, both 100.2 and 100.4 are in-window (100.0 just aged out).
+    CHECK(w.count_recent(101.1, 1.0) == 2);
+    // At now=102.0, all three have aged out.
+    CHECK(w.count_recent(102.0, 1.0) == 0);
+}
+
 TEST_CASE("escape_wipe: zero window only triggers when all stamps are equal") {
     EscapeWipe w;
     w.record(100.0, 0.0);

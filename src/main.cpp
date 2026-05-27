@@ -547,12 +547,16 @@ int main() {
     std::mt19937                     rabbit_rng(std::random_device{}());
     zg::input::EscapeWipe            esc_wipe;
     bool                             requested_exit = false;
+    // Window for the triple-escape wipe. 1.5s is forgiving enough to survive
+    // OS input latency on a relaxed tap-tap-tap; tightening this much under
+    // 1s starts making the gesture feel finicky.
+    constexpr double                 kWipeWindow = 1.5;
 
     while (!WindowShouldClose() && !requested_exit) {
-        // Triple-Escape wipe — three ESC presses within 1 second triggers a
-        // clean shutdown. (When SQLCipher lands this is where the key buffer
-        // gets zeroed before the DB closes.)
-        if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), 1.0)) {
+        // Triple-Escape wipe — three ESC presses within kWipeWindow seconds
+        // triggers a clean shutdown. (When SQLCipher lands this is where
+        // the key buffer gets zeroed before the DB closes.)
+        if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), kWipeWindow)) {
             requested_exit = true;
         }
 
@@ -830,6 +834,12 @@ int main() {
             } else {
                 ImGui::TextDisabled("first seen   (unknown)");
             }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("set once when the node is created:\n"
+                                  "  - fresh DB initial node generation\n"
+                                  "  - click-to-pin promotion of a phantom\n"
+                                  "never updated after that.");
+            }
             if (sn.last_touched > 0.0) {
                 const std::time_t t = static_cast<std::time_t>(sn.last_touched);
                 char buf[32];
@@ -837,6 +847,10 @@ int main() {
                 ImGui::Text("last touched %s", buf);
             } else {
                 ImGui::TextDisabled("last touched (unknown)");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("bumped whenever the operator edits title or content.\n"
+                                  "tier changes, physics drift, and incoming edges do NOT bump.");
             }
             ImGui::Spacing();
 
@@ -954,6 +968,16 @@ int main() {
         }
 
         rlImGuiEnd();
+
+        // Triple-escape wipe progress indicator — drawn last so it sits on
+        // top of everything (ImGui included). Big and red so the operator
+        // sees instantly whether their keypresses are landing.
+        const int esc_recent = esc_wipe.count_recent(GetTime(), kWipeWindow);
+        if (esc_recent > 0 && esc_recent < 3) {
+            const char* msg = TextFormat("ESC %d/3", esc_recent);
+            const int   tw  = MeasureText(msg, 36);
+            DrawText(msg, GetScreenWidth() - tw - 24, 24, 36, RED);
+        }
 
         EndDrawing();
     }
