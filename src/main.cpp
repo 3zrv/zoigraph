@@ -20,10 +20,14 @@
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
 #include "persistence/db.h"
+#include "persistence/project_store.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
 #include "telemetry/phantom_buffer.h"
 #include "telemetry/telemetry_thread.h"
+
+#include <filesystem>
+#include <memory>
 
 namespace {
 
@@ -475,61 +479,95 @@ int main() {
     const int loc_crt_resolution = GetShaderLocation(crt_shader, "resolution");
     const int loc_crt_time       = GetShaderLocation(crt_shader, "time");
 
-    // Persistence: hydrate the graph from disk if a previous run saved one;
-    // otherwise generate a fresh random layout. Node id == array index for
-    // now — when deletion lands we'll need an id-to-index remap on load.
-    zg::persistence::Database db("zoigraph.db");
-    std::vector<zg::persistence::StoredNode> stored_nodes;
-    std::vector<zg::graph::Edge>             initial_edges;
-    std::vector<Vector3>                     initial_positions;
-
-    if (db.load_graph(stored_nodes, initial_edges)) {
-        initial_positions.reserve(stored_nodes.size());
-        for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-    } else {
-        // Fresh DB: self node at id 0, anchored at origin, distinct tier.
-        // Then kNodeCount random nodes at ids 1..N. Random edges shift up
-        // by one so they reference the random nodes, never self.
-        const double now_ts = unix_now();
-        zg::persistence::StoredNode self_node{};
-        self_node.id           = 0;
-        self_node.position     = {0.0f, 0.0f, 0.0f};
-        self_node.title        = "self";
-        self_node.content      = "the operator";
-        self_node.first_seen   = now_ts;
-        self_node.last_touched = now_ts;
-        self_node.tier         = "self";
-        stored_nodes.push_back(std::move(self_node));
-        initial_positions.push_back({0.0f, 0.0f, 0.0f});
-
-        auto random_positions = make_initial_positions(kNodeCount);
-        for (std::size_t i = 0; i < random_positions.size(); ++i) {
-            initial_positions.push_back(random_positions[i]);
-            zg::persistence::StoredNode n{};
-            n.id           = static_cast<long long>(i + 1);
-            n.position     = random_positions[i];
-            n.first_seen   = now_ts;
-            n.last_touched = now_ts;
-            n.tier         = "confirmed";
-            stored_nodes.push_back(std::move(n));
-        }
-        initial_edges = make_random_edges(kNodeCount, kEdgeCount);
-        for (auto& e : initial_edges) {
-            e.source += 1;
-            e.target += 1;
-        }
-    }
+    // Multi-project model: each project lives in projects/<name>.db. The
+    // legacy single-file zoigraph.db is migrated into projects/default.db
+    // on first run with this code. The last-opened project name is stored
+    // in projects/.last so the next launch resumes there.
+    const std::filesystem::path kProjectsDir = "projects";
+    zg::persistence::migrate_legacy_db("zoigraph.db", kProjectsDir, "default");
 
     zg::graph::GraphBuffer            buffer;
     zg::telemetry::PhantomBuffer      phantom_buffer;
     zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
-    zg::physics::PhysicsThread        physics(
-        std::move(initial_positions),
-        initial_edges,
-        buffer,
-        &phantom_buffer);
-    physics.start();
     telemetry.start();
+
+    std::unique_ptr<zg::persistence::Database>    db;
+    std::unique_ptr<zg::physics::PhysicsThread>   physics;
+    std::vector<zg::persistence::StoredNode>      stored_nodes;
+    std::vector<zg::graph::Edge>                  edges_persisted;  // saved on switch
+    std::string                                   current_project;
+
+    auto open_project = [&](const std::string& name) {
+        // Save and tear down the current session if there is one.
+        if (physics) {
+            physics->stop();
+            std::vector<Vector3> final_positions;
+            std::vector<zg::graph::Edge> final_edges;
+            buffer.snapshot(final_positions, final_edges);
+            for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
+                stored_nodes[i].position = final_positions[i];
+            }
+            if (db) db->save_graph(stored_nodes, final_edges);
+            physics.reset();
+        }
+        db.reset();
+        phantom_buffer.clear();
+        stored_nodes.clear();
+        edges_persisted.clear();
+
+        current_project = name;
+        zg::persistence::write_last_project(kProjectsDir, name);
+        db = std::make_unique<zg::persistence::Database>(
+            zg::persistence::project_path(kProjectsDir, name).string());
+
+        std::vector<zg::graph::Edge> initial_edges;
+        std::vector<Vector3>         initial_positions;
+        if (db->load_graph(stored_nodes, initial_edges)) {
+            initial_positions.reserve(stored_nodes.size());
+            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
+        } else {
+            // Fresh project: self node + kNodeCount random nodes.
+            const double now_ts = unix_now();
+            zg::persistence::StoredNode self_node{};
+            self_node.id           = 0;
+            self_node.position     = {0.0f, 0.0f, 0.0f};
+            self_node.title        = "self";
+            self_node.content      = "the operator";
+            self_node.first_seen   = now_ts;
+            self_node.last_touched = now_ts;
+            self_node.tier         = "self";
+            stored_nodes.push_back(std::move(self_node));
+            initial_positions.push_back({0.0f, 0.0f, 0.0f});
+
+            auto random_positions = make_initial_positions(kNodeCount);
+            for (std::size_t i = 0; i < random_positions.size(); ++i) {
+                initial_positions.push_back(random_positions[i]);
+                zg::persistence::StoredNode n{};
+                n.id           = static_cast<long long>(i + 1);
+                n.position     = random_positions[i];
+                n.first_seen   = now_ts;
+                n.last_touched = now_ts;
+                n.tier         = "confirmed";
+                stored_nodes.push_back(std::move(n));
+            }
+            initial_edges = make_random_edges(kNodeCount, kEdgeCount);
+            for (auto& e : initial_edges) {
+                e.source += 1;
+                e.target += 1;
+            }
+        }
+        edges_persisted = initial_edges;
+        physics = std::make_unique<zg::physics::PhysicsThread>(
+            std::move(initial_positions),
+            initial_edges,
+            buffer,
+            &phantom_buffer);
+        physics->start();
+    };
+
+    // Ensure there's at least one project. If projects/ is empty, "default"
+    // will be auto-created by open_project's fresh-DB branch.
+    open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
 
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
@@ -644,12 +682,12 @@ int main() {
                     const zg::graph::Edge new_edge{
                         static_cast<std::size_t>(new_id), tidx};
                     edges.push_back(new_edge);
-                    physics.enqueue_edge(new_edge);
+                    physics->enqueue_edge(new_edge);
                 }
 
                 phantom_buffer.remove(ph.id);
-                db.save_graph(stored_nodes, edges);
-                physics.enqueue_node(ph.position);
+                db->save_graph(stored_nodes, edges);
+                physics->enqueue_node(ph.position);
                 selected_node = static_cast<int>(new_id);
             } else {
                 float best_dist = 0.0f;
@@ -803,6 +841,88 @@ int main() {
         ImGui::Begin("// INSPECTOR //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
+
+        // ---- PROJECT switcher ------------------------------------------
+        ImGui::TextDisabled("// PROJECT //");
+        ImGui::Text("active: %s", current_project.c_str());
+        {
+            const auto names = zg::persistence::list_projects(kProjectsDir);
+            int active_idx = -1;
+            std::vector<const char*> ptrs;
+            ptrs.reserve(names.size());
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                ptrs.push_back(names[i].c_str());
+                if (names[i] == current_project) active_idx = static_cast<int>(i);
+            }
+            if (!ptrs.empty()) {
+                if (ImGui::Combo("switch", &active_idx, ptrs.data(),
+                                 static_cast<int>(ptrs.size())) &&
+                    active_idx >= 0 &&
+                    names[static_cast<std::size_t>(active_idx)] != current_project) {
+                    selected_node = -1;
+                    search_query.clear();
+                    search_hits.clear();
+                    bones.panel_open = false;
+                    rabbit.active = false;
+                    open_project(names[static_cast<std::size_t>(active_idx)]);
+                }
+            }
+
+            static char new_name_buf[64] = "";
+            ImGui::InputText("new", new_name_buf, sizeof(new_name_buf));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("create")) {
+                const std::string n(new_name_buf);
+                if (zg::persistence::is_valid_project_name(n)) {
+                    const auto target = zg::persistence::project_path(kProjectsDir, n);
+                    if (!std::filesystem::exists(target)) {
+                        selected_node = -1;
+                        search_query.clear();
+                        search_hits.clear();
+                        bones.panel_open = false;
+                        rabbit.active = false;
+                        open_project(n);
+                        new_name_buf[0] = '\0';
+                    }
+                }
+            }
+
+            // Delete-current arming. First click sets the arm flag; second
+            // confirms. Disables itself if there's only one project left
+            // (always need at least one to be active).
+            static bool delete_armed = false;
+            const bool only_one = names.size() <= 1;
+            if (only_one) ImGui::BeginDisabled();
+            if (!delete_armed) {
+                if (ImGui::SmallButton("delete current...")) delete_armed = true;
+            } else {
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("yes, delete")) {
+                    const std::string victim = current_project;
+                    std::string fallback;
+                    for (const auto& n : names) {
+                        if (n != victim) { fallback = n; break; }
+                    }
+                    if (!fallback.empty()) {
+                        selected_node = -1;
+                        search_query.clear();
+                        search_hits.clear();
+                        bones.panel_open = false;
+                        rabbit.active = false;
+                        open_project(fallback);
+                        zg::persistence::delete_project(kProjectsDir, victim);
+                    }
+                    delete_armed = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("cancel")) delete_armed = false;
+            }
+            if (only_one) ImGui::EndDisabled();
+        }
+        ImGui::Separator();
+        // ---- /PROJECT --------------------------------------------------
+
         ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
         ImGui::Text("edges    %d", static_cast<int>(edges.size()));
         ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
@@ -815,7 +935,7 @@ int main() {
         // edits/shutdown, so the index reflects the on-disk state — local
         // unsaved edits to title/content won't surface until "save to disk."
         if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
-            search_hits = db.search(search_query);
+            search_hits = db->search(search_query);
             if (!search_hits.empty()) {
                 const auto idx = static_cast<std::size_t>(search_hits.front());
                 if (idx < positions.size()) {
@@ -849,7 +969,7 @@ int main() {
             }
             if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
                 sn.tier = kTiers[tier_idx];
-                db.update_node_tier(sn.id, sn.tier);
+                db->update_node_tier(sn.id, sn.tier);
             }
 
             // Timestamps — read-only display. 0 means "unknown" (legacy row
@@ -893,9 +1013,9 @@ int main() {
                 // next keystroke; triggers keep the FTS index in sync.
                 const double now_ts = unix_now();
                 sn.last_touched = now_ts;
-                db.update_node_text(sn.id, sn.title, sn.content, now_ts);
+                db->update_node_text(sn.id, sn.title, sn.content, now_ts);
                 // The query may now have new hits.
-                search_hits = db.search(search_query);
+                search_hits = db->search(search_query);
 
                 // Wikilinks: parse [[title]] occurrences out of the content
                 // and materialize them as edges from this node to whichever
@@ -926,7 +1046,7 @@ int main() {
                     if (exists) continue;
                     const zg::graph::Edge link_edge{src_idx, target_idx};
                     edges.push_back(link_edge);
-                    physics.enqueue_edge(link_edge);
+                    physics->enqueue_edge(link_edge);
                 }
             }
 
@@ -935,7 +1055,7 @@ int main() {
                      i < positions.size() && i < stored_nodes.size(); ++i) {
                     stored_nodes[i].position = positions[i];
                 }
-                db.save_graph(stored_nodes, edges);
+                db->save_graph(stored_nodes, edges);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("deselect")) selected_node = -1;
@@ -979,7 +1099,7 @@ int main() {
                         e.certainty = kCertainties[c_idx];
                         changed = true;
                     }
-                    if (changed) db.update_edge(e.source, e.target, e.label, e.kind, e.certainty);
+                    if (changed) db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
                 }
                 ImGui::PopID();
             }
@@ -990,9 +1110,9 @@ int main() {
         ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
         ImGui::Checkbox("CRT post-process", &post_process);
-        bool bh = physics.use_barnes_hut();
+        bool bh = physics->use_barnes_hut();
         if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
-            physics.set_use_barnes_hut(bh);
+            physics->set_use_barnes_hut(bh);
         }
         ImGui::Separator();
         ImGui::TextDisabled("LEFT-CLICK         select node");
@@ -1055,19 +1175,23 @@ int main() {
     }
 
     telemetry.stop();
-    physics.stop();
+    if (physics) physics->stop();
 
-    // Persist the converged layout. Titles and content carry through from the
-    // last load (or are empty on first run until the markdown editor lands).
-    std::vector<Vector3>         final_positions;
-    std::vector<zg::graph::Edge> final_edges;
-    buffer.snapshot(final_positions, final_edges);
-    stored_nodes.resize(final_positions.size());
-    for (std::size_t i = 0; i < final_positions.size(); ++i) {
-        stored_nodes[i].id       = static_cast<long long>(i);
-        stored_nodes[i].position = final_positions[i];
+    // Persist the converged layout for the currently-active project. Just
+    // sync positions back into stored_nodes; don't rebuild ids or shrink
+    // the vector — click-to-pin nodes are already in stored_nodes and
+    // would be lost by a naive resize+id-assign.
+    if (db) {
+        std::vector<Vector3>         final_positions;
+        std::vector<zg::graph::Edge> final_edges;
+        buffer.snapshot(final_positions, final_edges);
+        for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
+            stored_nodes[i].position = final_positions[i];
+        }
+        db->save_graph(stored_nodes, final_edges);
     }
-    db.save_graph(stored_nodes, final_edges);
+    physics.reset();
+    db.reset();
 
     UnloadRenderTexture(scene_rt);
     UnloadShader(crt_shader);

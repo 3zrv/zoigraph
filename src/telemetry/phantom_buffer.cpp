@@ -28,6 +28,11 @@ void PhantomBuffer::remove(long long id) {
         phantoms_.end());
 }
 
+void PhantomBuffer::clear() {
+    std::lock_guard<std::mutex> lock(mu_);
+    phantoms_.clear();
+}
+
 std::size_t PhantomBuffer::size() const {
     std::lock_guard<std::mutex> lock(mu_);
     return phantoms_.size();

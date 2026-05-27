@@ -10,6 +10,10 @@ add_executable(test_db test_db.cpp)
 target_link_libraries(test_db PRIVATE zg_persistence doctest::doctest)
 add_test(NAME db COMMAND test_db)
 
+add_executable(test_project_store test_project_store.cpp)
+target_link_libraries(test_project_store PRIVATE zg_persistence doctest::doctest)
+add_test(NAME project_store COMMAND test_project_store)
+
 add_executable(test_graph_buffer test_graph_buffer.cpp)
 target_link_libraries(test_graph_buffer PRIVATE zg_graph doctest::doctest)
 if(NOT WIN32)
