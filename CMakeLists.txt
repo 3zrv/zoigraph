@@ -114,6 +114,7 @@ target_link_libraries(zg_physics PUBLIC raylib)
 add_library(zg_render STATIC
     src/render/imgui_theme.cpp
     src/render/camera.cpp
+    src/render/draw.cpp
 )
 target_include_directories(zg_render PUBLIC src)
 target_link_libraries(zg_render PUBLIC imgui raylib)
