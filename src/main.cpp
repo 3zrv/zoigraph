@@ -12,8 +12,10 @@
 #include <cstddef>
 #include <ctime>
 #include <random>
+#include <set>
 #include <vector>
 
+#include "graph/cluster.h"
 #include "graph/graph_buffer.h"
 #include "graph/picks.h"
 #include "graph/types.h"
@@ -475,6 +477,8 @@ int main() {
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
+    std::vector<std::size_t>     cluster_ids;
+    std::string                  tag_filter;
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
@@ -494,6 +498,8 @@ int main() {
         stored_nodes.clear();
         edges.clear();
         positions.clear();
+        cluster_ids.clear();
+        tag_filter.clear();
 
         current_project = name;
         zg::persistence::write_last_project(kProjectsDir, name);
@@ -721,6 +727,30 @@ int main() {
                     255,
                 };
                 DrawSphereWires(positions[i], kNodeRadius * 1.2f, 6, 6, tag_col);
+            }
+
+            // Cluster halo: when label-propagation has been run, draw an
+            // outer ring colored by hash of the node's cluster id. Two
+            // nodes in the same cluster share the same color.
+            if (i < cluster_ids.size()) {
+                const std::size_t h = std::hash<std::size_t>{}(cluster_ids[i] + 1);
+                const Color cluster_col{
+                    static_cast<unsigned char>(0x70 | ((h >>  4) & 0x8F)),
+                    static_cast<unsigned char>(0x70 | ((h >> 12) & 0x8F)),
+                    static_cast<unsigned char>(0x70 | ((h >> 20) & 0x8F)),
+                    255,
+                };
+                DrawSphereWires(positions[i], kNodeRadius * 1.7f, 8, 8, cluster_col);
+            }
+
+            // Tag-filter highlight: bright cyan ring on any node carrying
+            // the filtered tag. Nothing changes for non-matching nodes —
+            // this is a highlight, not a hide.
+            if (!tag_filter.empty() && i < stored_nodes.size()) {
+                const auto& tags = stored_nodes[i].tags;
+                if (std::find(tags.begin(), tags.end(), tag_filter) != tags.end()) {
+                    DrawSphereWires(positions[i], kNodeRadius * 2.2f, 10, 10, SKYBLUE);
+                }
             }
         }
 
@@ -1153,6 +1183,53 @@ int main() {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");
         }
+        ImGui::Separator();
+
+        // ---- view filters ---------------------------------------------
+        // Tag filter: collect the unique set of tags across all nodes and
+        // expose them as a combo. Selecting one highlights matching nodes;
+        // "(all)" clears the filter.
+        {
+            std::vector<std::string> unique_tags = {"(all)"};
+            std::set<std::string>    seen;
+            for (const auto& sn : stored_nodes) {
+                for (const auto& t : sn.tags) {
+                    if (seen.insert(t).second) unique_tags.push_back(t);
+                }
+            }
+            int filter_idx = 0;
+            for (std::size_t k = 1; k < unique_tags.size(); ++k) {
+                if (unique_tags[k] == tag_filter) {
+                    filter_idx = static_cast<int>(k);
+                    break;
+                }
+            }
+            std::vector<const char*> filter_ptrs;
+            filter_ptrs.reserve(unique_tags.size());
+            for (const auto& s : unique_tags) filter_ptrs.push_back(s.c_str());
+            if (ImGui::Combo("filter by tag", &filter_idx,
+                             filter_ptrs.data(),
+                             static_cast<int>(filter_ptrs.size()))) {
+                tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
+            }
+        }
+
+        // Auto-cluster: button + clear button.  cluster_ids is the source of
+        // truth; populated on demand, displayed by the cluster halo above.
+        if (ImGui::Button("auto-cluster")) {
+            cluster_ids = zg::graph::label_propagation(
+                stored_nodes.size(), edges, /*max_iters=*/100);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("clear clusters")) {
+            cluster_ids.clear();
+        }
+        if (!cluster_ids.empty()) {
+            std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
+            ImGui::TextDisabled("%zu clusters across %zu nodes",
+                                unique_clusters.size(), cluster_ids.size());
+        }
+
         ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
         ImGui::Checkbox("CRT post-process", &post_process);
