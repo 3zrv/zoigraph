@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "persistence/db.h"
 #include "persistence/project_store.h"
 
 #include <filesystem>
@@ -159,4 +160,106 @@ TEST_CASE("project_store: migrate creates projects/ even when nothing to move") 
     migrate_legacy_db(base / "zoigraph.db", projects, "default");
     CHECK(fs::exists(projects));
     fs::remove_all(base);
+}
+
+// ---- Integration: project_store + Database --------------------------------
+// These exercise the actual "create new project" flow from main.cpp: open a
+// Database at the project_path, persist data, list_projects reports it,
+// reopening the same path preserves the data. The unit tests above stub the
+// DB with `touch_db`; here we run the real SQLite path.
+
+TEST_CASE("integration: creating a Database at project_path makes it discoverable") {
+    const auto dir = tmp_dir("integ_create");
+    fs::create_directories(dir);
+    REQUIRE(list_projects(dir).empty());
+
+    {
+        zg::persistence::Database db(project_path(dir, "alpha").string());
+        db.save_graph(
+            {{1, {1, 2, 3}, "first-note", "body"}},
+            {});
+    }
+
+    const auto names = list_projects(dir);
+    REQUIRE(names.size() == 1);
+    CHECK(names[0] == "alpha");
+
+    // Reopen and verify the data round-trips through the on-disk file.
+    {
+        zg::persistence::Database db(project_path(dir, "alpha").string());
+        std::vector<zg::persistence::StoredNode> nodes;
+        std::vector<zg::graph::Edge>             edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].title == "first-note");
+    }
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("integration: two projects in the same directory are fully isolated") {
+    const auto dir = tmp_dir("integ_isolated");
+    fs::create_directories(dir);
+
+    {
+        zg::persistence::Database alpha(project_path(dir, "alpha").string());
+        alpha.save_graph({{1, {0,0,0}, "from-alpha", ""}}, {});
+    }
+    {
+        zg::persistence::Database beta(project_path(dir, "beta").string());
+        beta.save_graph({{1, {0,0,0}, "from-beta", ""}}, {});
+    }
+
+    const auto names = list_projects(dir);
+    REQUIRE(names.size() == 2);
+    CHECK(names[0] == "alpha");
+    CHECK(names[1] == "beta");
+
+    {
+        zg::persistence::Database alpha(project_path(dir, "alpha").string());
+        std::vector<zg::persistence::StoredNode> nodes;
+        std::vector<zg::graph::Edge>             edges;
+        REQUIRE(alpha.load_graph(nodes, edges));
+        CHECK(nodes[0].title == "from-alpha");
+    }
+    {
+        zg::persistence::Database beta(project_path(dir, "beta").string());
+        std::vector<zg::persistence::StoredNode> nodes;
+        std::vector<zg::graph::Edge>             edges;
+        REQUIRE(beta.load_graph(nodes, edges));
+        CHECK(nodes[0].title == "from-beta");
+    }
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("integration: delete_project removes only the named project's files") {
+    const auto dir = tmp_dir("integ_delete");
+    fs::create_directories(dir);
+
+    {
+        zg::persistence::Database a(project_path(dir, "alpha").string());
+        a.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+    }
+    {
+        zg::persistence::Database b(project_path(dir, "beta").string());
+        b.save_graph({{1, {0,0,0}, "beta", ""}}, {});
+    }
+    REQUIRE(list_projects(dir).size() == 2);
+
+    CHECK(delete_project(dir, "alpha"));
+    const auto names = list_projects(dir);
+    REQUIRE(names.size() == 1);
+    CHECK(names[0] == "beta");
+    CHECK_FALSE(fs::exists(project_path(dir, "alpha")));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("integration: project_path('proj/a/../b') is still rejected up front") {
+    // is_valid_project_name guards the entire pipeline — once a name fails
+    // validation, none of the downstream functions should touch the disk.
+    CHECK_FALSE(is_valid_project_name("a/../b"));
+    CHECK_FALSE(is_valid_project_name("../escape"));
+    CHECK_FALSE(is_valid_project_name(".last"));
 }

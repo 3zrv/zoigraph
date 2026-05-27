@@ -868,23 +868,35 @@ int main() {
                 }
             }
 
-            static char new_name_buf[64] = "";
-            ImGui::InputText("new", new_name_buf, sizeof(new_name_buf));
+            static std::string new_name;
+            static std::string create_msg;
+            const bool submitted = ImGui::InputText("new", &new_name,
+                                                    ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) create_msg.clear();
             ImGui::SameLine();
-            if (ImGui::SmallButton("create")) {
-                const std::string n(new_name_buf);
-                if (zg::persistence::is_valid_project_name(n)) {
-                    const auto target = zg::persistence::project_path(kProjectsDir, n);
-                    if (!std::filesystem::exists(target)) {
-                        selected_node = -1;
-                        search_query.clear();
-                        search_hits.clear();
-                        bones.panel_open = false;
-                        rabbit.active = false;
-                        open_project(n);
-                        new_name_buf[0] = '\0';
-                    }
+            const bool clicked = ImGui::SmallButton("create");
+            if (submitted || clicked) {
+                if (new_name.empty()) {
+                    create_msg = "name is empty";
+                } else if (!zg::persistence::is_valid_project_name(new_name)) {
+                    create_msg = "name must be 1-64 chars: [A-Za-z0-9_-]";
+                } else if (std::filesystem::exists(
+                               zg::persistence::project_path(kProjectsDir, new_name))) {
+                    create_msg = "project already exists";
+                } else {
+                    selected_node = -1;
+                    search_query.clear();
+                    search_hits.clear();
+                    bones.panel_open = false;
+                    rabbit.active = false;
+                    const std::string to_open = new_name;
+                    new_name.clear();
+                    create_msg.clear();
+                    open_project(to_open);
                 }
+            }
+            if (!create_msg.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s", create_msg.c_str());
             }
 
             // Delete-current arming. First click sets the arm flag; second
