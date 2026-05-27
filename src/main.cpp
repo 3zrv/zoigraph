@@ -21,7 +21,19 @@
 #include "graph/timeline.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
+#include "app/clock.h"
+#include "app/session.h"
 #include "input/escape_wipe.h"
+#include "macros/bones.h"
+#include "macros/rabbit_hole.h"
+#include "render/camera.h"
+#include "render/draw.h"
+#include "render/imgui_theme.h"
+#include "render/shaders.h"
+#include "ui/bones_panel.h"
+#include "ui/help_tab.h"
+#include "ui/inspector_tab.h"
+#include "ui/toolbar_tab.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
 #include "persistence/seed.h"
@@ -40,379 +52,21 @@ constexpr int   kTelemetryPort  = 7777;
 constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
 constexpr float kPhantomRadius  = 1.2f;    // visibly larger than static nodes
 
-// Minimal GLSL 330 shader pair for raylib's DrawMeshInstanced. The vertex
-// shader expects a per-instance mat4 named `instanceTransform`; raylib's
-// renderer wires it up via SHADER_LOC_MATRIX_MODEL.
-constexpr const char* kInstancingVS = R"GLSL(
-#version 330
-in vec3 vertexPosition;
-in vec2 vertexTexCoord;
-in vec3 vertexNormal;
-in vec4 vertexColor;
-in mat4 instanceTransform;
+using zg::render::kInstancingVS;
+using zg::render::kInstancingFS;
+using zg::render::kCrtFS;
 
-out vec2 fragTexCoord;
-out vec4 fragColor;
-
-uniform mat4 mvp;
-
-void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor    = vertexColor;
-    gl_Position  = mvp * instanceTransform * vec4(vertexPosition, 1.0);
-}
-)GLSL";
-
-constexpr const char* kInstancingFS = R"GLSL(
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-
-uniform vec4 colDiffuse;
-
-out vec4 finalColor;
-
-void main() {
-    finalColor = colDiffuse;
-}
-)GLSL";
-
-// CRT post-process: chromatic aberration, scrolling scanlines, vignette.
-// Operates over fragTexCoord (0..1) from a fullscreen draw of the scene
-// RenderTexture. Resolution and time uniforms drive the per-frame look.
-constexpr const char* kCrtFS = R"GLSL(
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-
-uniform sampler2D texture0;
-uniform vec4 colDiffuse;
-uniform vec2 resolution;
-uniform float time;
-
-out vec4 finalColor;
-
-void main() {
-    vec2 uv = fragTexCoord;
-    vec2 center = vec2(0.5, 0.5);
-
-    // Chromatic aberration: separate R / B sampling offsets, growing with
-    // distance from screen center.
-    vec2 ab = (uv - center) * 0.0035;
-    float r = texture(texture0, uv + ab).r;
-    float g = texture(texture0, uv).g;
-    float b = texture(texture0, uv - ab).b;
-    vec3 col = vec3(r, g, b);
-
-    // Scanlines: vertical sinusoid in pixel space, slowly scrolling.
-    float scan = sin((uv.y * resolution.y + time * 18.0) * 1.4) * 0.5 + 0.5;
-    col *= mix(0.78, 1.0, scan);
-
-    // Vignette: darken everything outside the central 60%.
-    float d = length(uv - center);
-    float vignette = smoothstep(0.85, 0.35, d);
-    col *= vignette;
-
-    finalColor = vec4(col, 1.0) * colDiffuse;
-}
-)GLSL";
-
-void apply_terminal_theme() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding    = 0.0f;
-    style.FrameRounding     = 0.0f;
-    style.ScrollbarRounding = 0.0f;
-    style.WindowBorderSize  = 1.0f;
-    style.FrameBorderSize   = 1.0f;
-    style.WindowPadding     = ImVec2(8, 8);
-    style.ItemSpacing       = ImVec2(6, 4);
-
-    ImVec4* c = style.Colors;
-    c[ImGuiCol_WindowBg]       = ImVec4(0.03f, 0.03f, 0.03f, 0.94f);
-    c[ImGuiCol_Border]         = ImVec4(0.55f, 0.02f, 0.02f, 0.65f);
-    c[ImGuiCol_TitleBg]        = ImVec4(0.10f, 0.00f, 0.00f, 1.00f);
-    c[ImGuiCol_TitleBgActive]  = ImVec4(0.30f, 0.00f, 0.00f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.05f, 0.00f, 0.00f, 1.00f);
-    c[ImGuiCol_Text]           = ImVec4(0.95f, 0.25f, 0.25f, 1.00f);
-    c[ImGuiCol_TextDisabled]   = ImVec4(0.45f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_Separator]      = ImVec4(0.40f, 0.00f, 0.00f, 0.55f);
-    c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.00f, 0.00f, 0.80f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.00f, 0.00f, 0.80f);
-    c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
-}
-
-// Wall-clock Unix seconds. Stable across process restarts (unlike raylib's
-// GetTime which resets each launch), so it's what we persist for
-// first_seen / last_touched.
-double unix_now() {
-    using namespace std::chrono;
-    return duration<double>(system_clock::now().time_since_epoch()).count();
-}
-
-constexpr Vector3 kCameraDefaultPos       = {60.0f, 60.0f, 60.0f};
-constexpr Vector3 kCameraDefaultTarget    = {0.0f, 0.0f, 0.0f};
-constexpr float   kRabbitSegmentDuration  = 1.5f;  // seconds per hop
-constexpr int     kRabbitHopCount         = 3;     // directive §5.C: "through 3 random, connected edges"
-
-// Rabbit Hole macro state (directive §5.C). Driven from main.cpp because it
-// only ever exists in one instance and touches camera + selection state.
-struct RabbitHole {
-    bool                     active = false;
-    std::vector<std::size_t> path;            // node indices, length 2..(kRabbitHopCount + 1)
-    int                      segment = 0;     // current animated segment in [0, path.size() - 1)
-    float                    elapsed = 0.0f;  // seconds into the current segment
-    Vector3                  camera_offset{}; // captured at trigger time; preserved across the fly
-};
-
-// ---- Throw-the-bones macro -------------------------------------------------
-// Picks three weakly-connected nodes, smoothly flies the camera to frame all
-// three, and pops an ImGui scratch panel asking the operator what connects
-// them. Forced pattern recognition.
-struct Bones {
-    bool                     active     = false;
-    bool                     panel_open = false;
-    std::vector<std::size_t> chosen;
-    std::string              scratch;
-    float                    elapsed    = 0.0f;
-    float                    duration   = 1.2f;
-    Vector3                  from_target{};
-    Vector3                  to_target{};
-    Vector3                  from_position{};
-    Vector3                  to_position{};
-};
-
-void throw_bones(Bones& b,
-                 const std::vector<Vector3>& positions,
-                 const std::vector<zg::graph::Edge>& edges,
-                 const Camera3D& camera,
-                 std::mt19937& rng) {
-    b.chosen = zg::graph::pick_weakly_connected_triple(positions.size(), edges, rng);
-    if (b.chosen.size() != 3) {
-        b.active = false;
-        b.panel_open = false;
-        return;
-    }
-
-    Vector3 centroid{0, 0, 0};
-    for (auto i : b.chosen) {
-        centroid.x += positions[i].x;
-        centroid.y += positions[i].y;
-        centroid.z += positions[i].z;
-    }
-    centroid.x /= 3.0f; centroid.y /= 3.0f; centroid.z /= 3.0f;
-
-    float spread = 0.0f;
-    for (std::size_t i = 0; i < b.chosen.size(); ++i) {
-        for (std::size_t j = i + 1; j < b.chosen.size(); ++j) {
-            const Vector3 d = Vector3Subtract(positions[b.chosen[i]], positions[b.chosen[j]]);
-            spread = std::max(spread, Vector3Length(d));
-        }
-    }
-
-    // Camera position: back off from the centroid along the current view
-    // direction at a distance proportional to the spread, so all three fit
-    // comfortably in frame.
-    const Vector3 view_offset   = Vector3Subtract(camera.position, camera.target);
-    const float   current_dist  = std::max(0.01f, Vector3Length(view_offset));
-    const Vector3 dir_n         = Vector3Scale(view_offset, 1.0f / current_dist);
-    const float   target_dist   = std::max(20.0f, spread * 2.5f);
-
-    b.from_target   = camera.target;
-    b.to_target     = centroid;
-    b.from_position = camera.position;
-    b.to_position   = Vector3Add(centroid, Vector3Scale(dir_n, target_dist));
-    b.elapsed       = 0.0f;
-    b.active        = true;
-    b.panel_open    = true;
-    b.scratch.clear();
-}
-
-void update_bones(Bones& b, Camera3D& camera, float dt) {
-    if (!b.active) return;
-    b.elapsed += dt;
-    if (b.elapsed >= b.duration) {
-        camera.target   = b.to_target;
-        camera.position = b.to_position;
-        b.active        = false;
-        return;
-    }
-    const float t = b.elapsed / b.duration;
-    const float s = t * t * (3.0f - 2.0f * t);  // smoothstep
-    camera.target   = Vector3Lerp(b.from_target,   b.to_target,   s);
-    camera.position = Vector3Lerp(b.from_position, b.to_position, s);
-}
-
-// Re-triggers the Bones fly machinery for a single node — used by the
-// clickable rows inside the bones scratch panel. Preserves the current
-// camera offset (zoom + angle) so the view shifts to the node without
-// reframing the whole field.
-void bones_fly_to_node(Bones& b, std::size_t node_idx,
-                       const std::vector<Vector3>& positions,
-                       Camera3D& camera) {
-    if (node_idx >= positions.size()) return;
-    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-    b.from_target   = camera.target;
-    b.to_target     = positions[node_idx];
-    b.from_position = camera.position;
-    b.to_position   = Vector3Add(positions[node_idx], offset);
-    b.elapsed       = 0.0f;
-    b.duration      = 0.6f;  // snappier than the initial throw
-    b.active        = true;
-}
-
-// Walk `kRabbitHopCount` random connected edges starting at `start`. May
-// terminate early if a node has no neighbors — the macro just animates a
-// shorter trip in that case.
-std::vector<std::size_t> pick_rabbit_path(std::size_t start,
-                                          const std::vector<zg::graph::Edge>& edges,
-                                          std::mt19937& rng,
-                                          std::size_t max_nodes) {
-    std::vector<std::size_t> path = {start};
-    std::size_t current = start;
-    for (int hop = 0; hop < kRabbitHopCount; ++hop) {
-        std::vector<std::size_t> neighbors;
-        for (const auto& e : edges) {
-            if (e.source == current && e.target < max_nodes && e.target != current) {
-                neighbors.push_back(e.target);
-            } else if (e.target == current && e.source < max_nodes && e.source != current) {
-                neighbors.push_back(e.source);
-            }
-        }
-        if (neighbors.empty()) break;
-        std::uniform_int_distribution<std::size_t> dist(0, neighbors.size() - 1);
-        current = neighbors[dist(rng)];
-        path.push_back(current);
-    }
-    return path;
-}
-
-// Advance the macro by `dt` seconds; smoothly interpolate camera.target
-// along the current segment with smoothstep easing. Promotes selection to
-// the final node when the path completes.
-void update_rabbit_hole(RabbitHole& rh,
-                        Camera3D& camera,
-                        const std::vector<Vector3>& positions,
-                        int& selected_node,
-                        float dt) {
-    if (!rh.active) return;
-
-    rh.elapsed += dt;
-    while (rh.elapsed >= kRabbitSegmentDuration) {
-        rh.elapsed -= kRabbitSegmentDuration;
-        rh.segment++;
-        if (rh.segment >= static_cast<int>(rh.path.size()) - 1) {
-            if (!rh.path.empty() && rh.path.back() < positions.size()) {
-                camera.target   = positions[rh.path.back()];
-                camera.position = Vector3Add(camera.target, rh.camera_offset);
-                selected_node   = static_cast<int>(rh.path.back());
-            }
-            rh.active = false;
-            return;
-        }
-    }
-
-    const std::size_t a_idx = rh.path[rh.segment];
-    const std::size_t b_idx = rh.path[rh.segment + 1];
-    if (a_idx >= positions.size() || b_idx >= positions.size()) {
-        rh.active = false;
-        return;
-    }
-    const float t      = rh.elapsed / kRabbitSegmentDuration;
-    const float smooth = t * t * (3.0f - 2.0f * t);  // ease in / ease out
-    camera.target   = Vector3Lerp(positions[a_idx], positions[b_idx], smooth);
-    camera.position = Vector3Add(camera.target, rh.camera_offset);
-}
-
-// Animated jagged line for phantom-to-static connections. Subdivides the
-// straight segment into kSegments pieces and perturbs each interior point
-// perpendicular to the line using sin/cos driven by phantom-specific seed
-// and a wall-clock time term, so the lines visibly jitter ("erratic" per
-// directive §5.B).
-void draw_jagged_line(Vector3 a, Vector3 b, Color color, double time, long long seed) {
-    constexpr int   kSegments  = 8;
-    constexpr float kAmplitude = 0.45f;
-
-    const Vector3 dir       = Vector3Subtract(b, a);
-    const float   length    = Vector3Length(dir);
-    if (length < 0.01f) {
-        DrawLine3D(a, b, color);
-        return;
-    }
-    const Vector3 dir_n = Vector3Scale(dir, 1.0f / length);
-    const Vector3 ref   = (std::fabs(dir_n.y) < 0.9f) ? Vector3{0, 1, 0} : Vector3{1, 0, 0};
-    const Vector3 perp1 = Vector3Normalize(Vector3CrossProduct(dir_n, ref));
-    const Vector3 perp2 = Vector3Normalize(Vector3CrossProduct(dir_n, perp1));
-
-    Vector3 prev = a;
-    for (int i = 1; i < kSegments; ++i) {
-        const float t   = static_cast<float>(i) / kSegments;
-        const float seg = static_cast<float>(i) * 37.0f
-                        + static_cast<float>(seed % 997)
-                        + static_cast<float>(time) * 7.0f;
-        const float p1off = std::sin(seg)            * kAmplitude;
-        const float p2off = std::cos(seg * 1.31f)    * kAmplitude;
-        const Vector3 base   = Vector3Lerp(a, b, t);
-        const Vector3 offset = Vector3Add(Vector3Scale(perp1, p1off),
-                                          Vector3Scale(perp2, p2off));
-        const Vector3 jagged = Vector3Add(base, offset);
-        DrawLine3D(prev, jagged, color);
-        prev = jagged;
-    }
-    DrawLine3D(prev, b, color);
-}
-
-// Custom orbit camera: right-drag rotates around the target, Shift+right-drag
-// pans, scroll dollies, R resets. Gated against ImGui mouse-capture so
-// dragging on the inspector doesn't reach through to the 3D layer.
-void update_orbit_camera(Camera3D& camera) {
-    const bool ui_has_mouse = ImGui::GetIO().WantCaptureMouse;
-    const Vector2 dm        = GetMouseDelta();
-    const float wheel       = GetMouseWheelMove();
-    const bool shift_down   = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-
-    if (!ui_has_mouse) {
-        const bool dragging = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
-                              (dm.x != 0.0f || dm.y != 0.0f);
-
-        if (dragging && shift_down) {
-            const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-            const Vector3 right  = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
-            const Vector3 up     = Vector3Normalize(Vector3CrossProduct(Vector3Negate(offset), right));
-            const float scale    = Vector3Length(offset) * 0.0015f;
-            const Vector3 pan    = Vector3Add(Vector3Scale(right, -dm.x * scale),
-                                              Vector3Scale(up,    dm.y * scale));
-            camera.position = Vector3Add(camera.position, pan);
-            camera.target   = Vector3Add(camera.target,   pan);
-        } else if (dragging) {
-            Vector3 offset = Vector3Subtract(camera.position, camera.target);
-
-            // Yaw around the world up axis.
-            offset = Vector3RotateByAxisAngle(offset, camera.up, -dm.x * 0.005f);
-
-            // Pitch around the camera-right axis, clamped to avoid gimbal flip.
-            const Vector3 right = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
-            const Vector3 pitched = Vector3RotateByAxisAngle(offset, right, -dm.y * 0.005f);
-            const Vector3 dir = Vector3Normalize(pitched);
-            if (std::fabs(Vector3DotProduct(dir, camera.up)) < 0.985f) {
-                offset = pitched;
-            }
-            camera.position = Vector3Add(camera.target, offset);
-        }
-
-        if (wheel != 0.0f) {
-            Vector3 offset = Vector3Subtract(camera.position, camera.target);
-            float distance = Vector3Length(offset);
-            distance = std::clamp(distance * (1.0f - wheel * 0.1f), 2.0f, 500.0f);
-            offset = Vector3Scale(Vector3Normalize(offset), distance);
-            camera.position = Vector3Add(camera.target, offset);
-        }
-    }
-
-    if (IsKeyPressed(KEY_R)) {
-        camera.position = kCameraDefaultPos;
-        camera.target   = kCameraDefaultTarget;
-    }
-}
+using zg::app::unix_now;
+using zg::render::kCameraDefaultPos;
+using zg::render::kCameraDefaultTarget;
+using zg::render::update_orbit_camera;
+using zg::macros::RabbitHole;
+using zg::macros::pick_rabbit_path;
+using zg::macros::update_rabbit_hole;
+using zg::macros::Bones;
+using zg::macros::throw_bones;
+using zg::macros::update_bones;
+using zg::macros::bones_fly_to_node;
 
 }  // namespace
 
@@ -428,7 +82,7 @@ int main() {
     SetExitKey(KEY_NULL);
 
     rlImGuiSetup(true);
-    apply_terminal_theme();
+    zg::render::apply_terminal_theme();
 
     Camera3D camera{};
     camera.position   = kCameraDefaultPos;
@@ -466,130 +120,33 @@ int main() {
     zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
     telemetry.start();
 
-    std::unique_ptr<zg::persistence::Database>    db;
-    std::unique_ptr<zg::physics::PhysicsThread>   physics;
-    std::vector<zg::persistence::StoredNode>      stored_nodes;
-    std::string                                   current_project;
+    // All per-project state lives in Session; aliases below let the rest of
+    // main.cpp keep using the short names while open_project repopulates
+    // everything on each switch.
+    zg::app::Session session;
+    auto& db            = session.db;
+    auto& physics       = session.physics;
+    auto& stored_nodes  = session.stored_nodes;
+    auto& edges         = session.edges;
+    auto& positions     = session.positions;
+    auto& cluster_ids   = session.cluster_ids;
+    auto& tag_filter    = session.tag_filter;
+    auto& self_idx      = session.self_idx;
+    auto& timeline_mode = session.timeline_mode;
+    auto& prev_open_ts  = session.prev_open_ts;
+    auto& current_project = session.current_project;
+    auto& selected_node = session.selected_node;
+    auto& search_query  = session.search_query;
+    auto& search_hits   = session.search_hits;
 
-    // Render-loop workspace — owned by main, NOT refilled from the buffer
-    // each frame. Physics publishes positions; main owns edges. Edge
-    // metadata edits (label / kind / certainty) live here and would be
-    // clobbered if we snapshotted them back from the buffer.
-    std::vector<Vector3>         positions;
-    std::vector<zg::graph::Edge> edges;
-    std::vector<Matrix>          transforms;
-    std::vector<std::size_t>     cluster_ids;
-    std::string                  tag_filter;
-    std::size_t                  self_idx = SIZE_MAX;  // tier=="self" lookup, SIZE_MAX if absent
-    bool                         timeline_mode  = false;
-    double                       prev_open_ts   = 0.0;  // last_open_ts before this session bumped it
+    std::vector<Matrix> transforms;
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
-        // Save and tear down the current session if there is one.
-        if (physics) {
-            physics->stop();
-            std::vector<Vector3> final_positions;
-            buffer.snapshot(final_positions);
-            for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
-                stored_nodes[i].position = final_positions[i];
-            }
-            if (db) db->save_graph(stored_nodes, edges);
-            physics.reset();
-        }
-        db.reset();
-        phantom_buffer.clear();
-        stored_nodes.clear();
-        edges.clear();
-        positions.clear();
-        cluster_ids.clear();
-        tag_filter.clear();
-
-        current_project = name;
-        zg::persistence::write_last_project(kProjectsDir, name);
-        db = std::make_unique<zg::persistence::Database>(
-            zg::persistence::project_path(kProjectsDir, name).string());
-
-        std::vector<zg::graph::Edge> initial_edges;
-        std::vector<Vector3>         initial_positions;
-        if (db->load_graph(stored_nodes, initial_edges)) {
-            initial_positions.reserve(stored_nodes.size());
-            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-        } else {
-            // Fresh project: named seed (self + alice + bob, ids 0..2)
-            // followed by 300 random nodes (ids 3..302) populated with
-            // codename titles, stock content snippets, 0-3 random tags
-            // each, plus 200 random edges among them. Plenty of material
-            // for auto-cluster / filter / search the moment the project
-            // opens.
-            const double now_ts = unix_now();
-            auto seed = zg::persistence::make_initial_graph(now_ts);
-            auto fill = zg::persistence::make_random_fill(
-                /*node_count=*/300,
-                /*edge_count=*/200,
-                /*start_id=*/static_cast<long long>(seed.nodes.size()),
-                /*now_unix=*/now_ts,
-                /*spread=*/25.0f,
-                /*rng_seed=*/42,
-                /*with_data=*/true);
-            stored_nodes = std::move(seed.nodes);
-            stored_nodes.insert(stored_nodes.end(),
-                                std::make_move_iterator(fill.nodes.begin()),
-                                std::make_move_iterator(fill.nodes.end()));
-            initial_edges = std::move(seed.edges);
-            initial_edges.insert(initial_edges.end(),
-                                 fill.edges.begin(), fill.edges.end());
-            initial_positions.reserve(stored_nodes.size());
-            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-        }
-        // Seed main's render-loop state from what's about to be handed to
-        // physics. From here on these belong to main.
-        positions = initial_positions;
-        edges     = initial_edges;
-
-        // Find the self node (tier == "self") so touch-edges and the
-        // self-pin both have a stable anchor. Falls back to SIZE_MAX if
-        // the project doesn't have one (legacy DBs or operator-deleted).
-        self_idx = SIZE_MAX;
-        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
-            if (stored_nodes[i].tier == "self") {
-                self_idx = i;
-                break;
-            }
-        }
-
-        physics = std::make_unique<zg::physics::PhysicsThread>(
-            std::move(initial_positions),
-            initial_edges,
-            buffer,
-            &phantom_buffer);
-        physics->start();
-
-        // Pin the self node at its current position so the rest of the
-        // graph arranges itself relative to a fixed center.
-        if (self_idx < positions.size()) {
-            physics->set_pin(self_idx, positions[self_idx]);
-        }
-
-        // Diff-since-last-open: snapshot the previous last_open_ts (used by
-        // the render to tint new/changed nodes) then bump it to now. Old
-        // projects without a stored value get prev_open_ts = 0, which
-        // suppresses the tints on first viewing.
-        prev_open_ts = db->meta_double("last_open_ts", 0.0);
-        db->set_meta_double("last_open_ts", unix_now());
-
-        // A project switch leaves any prior timeline-mode state behind —
-        // start the new session in force-directed mode.
-        timeline_mode = false;
+        zg::app::open_project(session, name, kProjectsDir, buffer, phantom_buffer);
     };
-
-    // Ensure there's at least one project. If projects/ is empty, "default"
-    // will be auto-created by open_project's fresh-DB branch.
     open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
 
-    int                              selected_node = -1;
-    std::string                      search_query;
-    std::vector<long long>           search_hits;
     std::vector<zg::telemetry::Phantom> phantoms;
     bool                             show_grid     = true;
     bool                             post_process  = true;
@@ -872,7 +429,7 @@ int main() {
                 for (long long target_id : ph.connections) {
                     const auto idx = static_cast<std::size_t>(target_id);
                     if (target_id < 0 || idx >= positions.size()) continue;
-                    draw_jagged_line(ph.position, positions[idx], glow, now, ph.id);
+                    zg::render::draw_jagged_line(ph.position, positions[idx], glow, now, ph.id);
                 }
             }
             rlSetBlendMode(RL_BLEND_ALPHA);
@@ -1034,535 +591,23 @@ int main() {
 
         if (ImGui::BeginTabBar("zg_tabs")) {
         if (ImGui::BeginTabItem("Inspector")) {
-
-        ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
-        ImGui::Text("edges    %d", static_cast<int>(edges.size()));
-        ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
-                    telemetry.listening() ? "(udp :7777)" : "(listener off)");
-        ImGui::Text("fps      %d", GetFPS());
-        ImGui::Separator();
-
-        // Real-time FTS5 search: on each keystroke, re-query the DB and jump
-        // camera + selection to the top hit. The DB save_graph happens on
-        // edits/shutdown, so the index reflects the on-disk state — local
-        // unsaved edits to title/content won't surface until "save to disk."
-        if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
-            search_hits = db->search(search_query);
-            if (!search_hits.empty()) {
-                const auto idx = static_cast<std::size_t>(search_hits.front());
-                if (idx < positions.size()) {
-                    selected_node = static_cast<int>(idx);
-                    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-                    camera.target = positions[idx];
-                    camera.position = Vector3Add(camera.target, offset);
-                }
-            }
-        }
-        if (!search_query.empty()) {
-            ImGui::TextDisabled("%d match%s",
-                                static_cast<int>(search_hits.size()),
-                                search_hits.size() == 1 ? "" : "es");
-        }
-        ImGui::Separator();
-        if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()
-            && static_cast<std::size_t>(selected_node) < stored_nodes.size()) {
-            const Vector3 p = positions[selected_node];
-            ImGui::Text("node %d   pos %+6.1f %+6.1f %+6.1f", selected_node, p.x, p.y, p.z);
-            ImGui::Spacing();
-
-            auto& sn = stored_nodes[selected_node];
-
-            // Tier picker: drives halo color in the 3D view and persists
-            // immediately on change (no save-to-disk required).
-            static const char* kTiers[] = {"confirmed", "suspected", "phantom", "self"};
-            int tier_idx = 0;
-            for (int t = 0; t < 4; ++t) {
-                if (sn.tier == kTiers[t]) { tier_idx = t; break; }
-            }
-            if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
-                sn.tier = kTiers[tier_idx];
-                db->update_node_tier(sn.id, sn.tier);
-            }
-
-            // Tag chips: each existing tag renders as a small "<tag> x"
-            // button. Clicking removes the tag and persists the new set.
-            ImGui::TextDisabled("tags");
-            int remove_idx = -1;
-            for (std::size_t ti = 0; ti < sn.tags.size(); ++ti) {
-                ImGui::PushID(static_cast<int>(ti));
-                const std::string chip = sn.tags[ti] + " x";
-                if (ImGui::SmallButton(chip.c_str())) {
-                    remove_idx = static_cast<int>(ti);
-                }
-                ImGui::PopID();
-                ImGui::SameLine();
-            }
-            ImGui::NewLine();
-            if (remove_idx >= 0) {
-                sn.tags.erase(sn.tags.begin() + remove_idx);
-                db->update_node_tags(sn.id, sn.tags);
-            }
-            static std::string new_tag;
-            const bool tag_submit = ImGui::InputText("add tag", &new_tag,
-                                                     ImGuiInputTextFlags_EnterReturnsTrue);
-            ImGui::SameLine();
-            const bool tag_click = ImGui::SmallButton("+##tag");
-            if (tag_submit || tag_click) {
-                if (!new_tag.empty()) {
-                    // Dedup before adding so the chip row doesn't grow
-                    // visual duplicates that the DB would silently dedup.
-                    if (std::find(sn.tags.begin(), sn.tags.end(), new_tag) == sn.tags.end()) {
-                        sn.tags.push_back(new_tag);
-                        db->update_node_tags(sn.id, sn.tags);
-                    }
-                    new_tag.clear();
-                }
-            }
-
-            // Timestamps — read-only display. 0 means "unknown" (legacy row
-            // from before the schema migration).
-            if (sn.first_seen > 0.0) {
-                const std::time_t t = static_cast<std::time_t>(sn.first_seen);
-                char buf[32];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-                ImGui::Text("first seen   %s", buf);
-            } else {
-                ImGui::TextDisabled("first seen   (unknown)");
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("set once when the node is created:\n"
-                                  "  - fresh DB initial node generation\n"
-                                  "  - click-to-pin promotion of a phantom\n"
-                                  "never updated after that.");
-            }
-            if (sn.last_touched > 0.0) {
-                const std::time_t t = static_cast<std::time_t>(sn.last_touched);
-                char buf[32];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-                ImGui::Text("last touched %s", buf);
-            } else {
-                ImGui::TextDisabled("last touched (unknown)");
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("bumped whenever the operator edits title or content.\n"
-                                  "tier changes, physics drift, and incoming edges do NOT bump.");
-            }
-            ImGui::Spacing();
-
-            bool text_changed = false;
-            text_changed |= ImGui::InputText("title", &sn.title);
-            ImGui::TextDisabled("content (markdown)");
-            text_changed |= ImGui::InputTextMultiline(
-                "##content", &sn.content,
-                ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
-            if (text_changed) {
-                // Persist the edit immediately so search picks it up on the
-                // next keystroke; triggers keep the FTS index in sync.
-                const double now_ts = unix_now();
-                sn.last_touched = now_ts;
-                db->update_node_text(sn.id, sn.title, sn.content, now_ts);
-                // The query may now have new hits.
-                search_hits = db->search(search_query);
-
-                // Touch-edge: any operator edit on a non-self node should
-                // create a record-of-attention from self -> that node.
-                // certainty="hearsay" so the line renders dim and doesn't
-                // visually compete with confirmed edges.
-                if (self_idx < stored_nodes.size() &&
-                    self_idx != static_cast<std::size_t>(selected_node)) {
-                    const std::size_t sel = static_cast<std::size_t>(selected_node);
-                    bool already = false;
-                    for (const auto& e : edges) {
-                        if ((e.source == self_idx && e.target == sel) ||
-                            (e.source == sel && e.target == self_idx)) {
-                            already = true;
-                            break;
-                        }
-                    }
-                    if (!already) {
-                        const zg::graph::Edge touch{
-                            self_idx, sel, "touched", "saw-at", "hearsay"};
-                        edges.push_back(touch);
-                        physics->enqueue_edge(touch);
-                    }
-                }
-
-                // Wikilinks: parse [[title]] occurrences out of the content
-                // and materialize them as edges from this node to whichever
-                // existing node has a matching title. Skip duplicates so
-                // re-saving doesn't fan out parallel edges. Edge persists
-                // via the explicit save button or shutdown save.
-                const auto refs = zg::graph::extract_wikilinks(sn.content);
-                for (const std::string& title : refs) {
-                    if (title.empty()) continue;
-                    std::size_t target_idx = SIZE_MAX;
-                    for (std::size_t k = 0; k < stored_nodes.size(); ++k) {
-                        if (stored_nodes[k].title == title) {
-                            target_idx = k;
-                            break;
-                        }
-                    }
-                    if (target_idx == SIZE_MAX) continue;
-                    if (target_idx == static_cast<std::size_t>(selected_node)) continue;
-                    const std::size_t src_idx = static_cast<std::size_t>(selected_node);
-                    bool exists = false;
-                    for (const auto& e : edges) {
-                        if ((e.source == src_idx && e.target == target_idx) ||
-                            (e.source == target_idx && e.target == src_idx)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (exists) continue;
-                    const zg::graph::Edge link_edge{src_idx, target_idx};
-                    edges.push_back(link_edge);
-                    physics->enqueue_edge(link_edge);
-                }
-            }
-
-            if (ImGui::Button("save to disk")) {
-                for (std::size_t i = 0;
-                     i < positions.size() && i < stored_nodes.size(); ++i) {
-                    stored_nodes[i].position = positions[i];
-                }
-                db->save_graph(stored_nodes, edges);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("deselect")) selected_node = -1;
-
-            // Incident edges — list every edge touching the selected node
-            // with editable label / kind / certainty. Updates persist
-            // immediately via update_edge; no save-button needed.
-            ImGui::Spacing();
-            ImGui::Separator();
-            const std::size_t sel = static_cast<std::size_t>(selected_node);
-            int incident_count = 0;
-            for (const auto& e : edges) {
-                if (e.source == sel || e.target == sel) ++incident_count;
-            }
-            ImGui::Text("edges (%d incident)", incident_count);
-
-            // Edge editor — flat layout, no CollapsingHeader.  Each row is
-            // its own ImGui::PushID scope so the label/kind/certainty
-            // widgets get unique IDs per edge.  A persistent edit_counter
-            // ticks every time a change registers; if you edit and the
-            // counter doesn't move, the change isn't being detected.
-            static const char* kKindLabels[]  = {"(none)", "knows", "owns", "saw-at", "shell-of", "suspected"};
-            static const char* kKindValues[]  = {"",       "knows", "owns", "saw-at", "shell-of", "suspected"};
-            static const char* kCertainties[] = {"confirmed", "suspected", "hearsay", "phantom"};
-            static int edge_edit_counter = 0;
-            ImGui::TextDisabled("edge edits registered: %d", edge_edit_counter);
-            ImGui::Spacing();
-
-            for (std::size_t i = 0; i < edges.size(); ++i) {
-                auto& e = edges[i];
-                if (e.source != sel && e.target != sel) continue;
-                const std::size_t other = (e.source == sel) ? e.target : e.source;
-                const char* other_title = (other < stored_nodes.size() && !stored_nodes[other].title.empty())
-                                          ? stored_nodes[other].title.c_str()
-                                          : "(untitled)";
-                ImGui::PushID(static_cast<int>(i));
-                ImGui::Separator();
-                ImGui::Text("-> %zu  %s", other, other_title);
-
-                bool changed = false;
-                if (ImGui::InputText("label", &e.label))    changed = true;
-
-                int kind_idx = 0;
-                for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }
-                if (ImGui::Combo("kind", &kind_idx, kKindLabels, 6)) {
-                    e.kind = kKindValues[kind_idx];
-                    changed = true;
-                }
-
-                int c_idx = 0;
-                for (int k = 0; k < 4; ++k) if (e.certainty == kCertainties[k]) { c_idx = k; break; }
-                if (ImGui::Combo("certainty", &c_idx, kCertainties, 4)) {
-                    e.certainty = kCertainties[c_idx];
-                    changed = true;
-                }
-
-                if (changed) {
-                    ++edge_edit_counter;
-                    db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
-                }
-                ImGui::PopID();
-            }
-        } else {
-            ImGui::TextDisabled("selected: (none)");
-            ImGui::TextDisabled("(left-click a node)");
-        }
-        ImGui::Separator();
-
-        // ---- view filters ---------------------------------------------
-        // Tag filter: collect the unique set of tags across all nodes and
-        // expose them as a combo. Selecting one highlights matching nodes;
-        // "(all)" clears the filter.
-        {
-            std::vector<std::string> unique_tags = {"(all)"};
-            std::set<std::string>    seen;
-            for (const auto& sn : stored_nodes) {
-                for (const auto& t : sn.tags) {
-                    if (seen.insert(t).second) unique_tags.push_back(t);
-                }
-            }
-            int filter_idx = 0;
-            for (std::size_t k = 1; k < unique_tags.size(); ++k) {
-                if (unique_tags[k] == tag_filter) {
-                    filter_idx = static_cast<int>(k);
-                    break;
-                }
-            }
-            std::vector<const char*> filter_ptrs;
-            filter_ptrs.reserve(unique_tags.size());
-            for (const auto& s : unique_tags) filter_ptrs.push_back(s.c_str());
-            if (ImGui::Combo("filter by tag", &filter_idx,
-                             filter_ptrs.data(),
-                             static_cast<int>(filter_ptrs.size()))) {
-                tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
-            }
-        }
-
-        // Auto-cluster: button + clear button.  cluster_ids is the source of
-        // truth; populated on demand, displayed by the cluster halo above.
-        if (ImGui::Button("auto-cluster")) {
-            cluster_ids = zg::graph::label_propagation(
-                stored_nodes.size(), edges, /*max_iters=*/100);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("clear clusters")) {
-            cluster_ids.clear();
-        }
-        if (!cluster_ids.empty()) {
-            std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
-            ImGui::TextDisabled("%zu clusters across %zu nodes",
-                                unique_clusters.size(), cluster_ids.size());
-        }
-
-        ImGui::Separator();
-        ImGui::Checkbox("show grid", &show_grid);
-        ImGui::Checkbox("CRT post-process", &post_process);
-        bool bh = physics->use_barnes_hut();
-        if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
-            physics->set_use_barnes_hut(bh);
-        }
-        ImGui::Separator();
+            zg::ui::render_inspector_tab(session, camera, phantoms, telemetry,
+                                         show_grid, post_process);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Toolbar")) {
-            // Toolbar tab — manual node creation and local phantom injection.
-            // Same data paths used by click-to-pin and the UDP listener, so
-            // operators get a quick way to grow the graph without leaving
-            // the keyboard or running an external tool.
-
-            static std::string tb_node_title;
-            static std::string tb_node_msg;
-            static int         tb_node_tier_idx = 0;
-            static const char* kToolbarTiers[] = {"confirmed", "suspected", "phantom"};
-
-            ImGui::TextDisabled("create static node");
-            const bool node_submitted = ImGui::InputText("title##tb_node", &tb_node_title,
-                                                         ImGuiInputTextFlags_EnterReturnsTrue);
-            if (ImGui::IsItemEdited()) tb_node_msg.clear();
-            ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
-            if (ImGui::Button("create node") || node_submitted) {
-                if (tb_node_title.empty()) {
-                    tb_node_msg = "title is empty";
-                } else if (!physics || !db) {
-                    tb_node_msg = "no active project";
-                } else {
-                    const double now_ts = unix_now();
-                    const long long new_id = static_cast<long long>(stored_nodes.size());
-                    const float angle = 0.7f * static_cast<float>(new_id);
-                    const Vector3 spawn{
-                        8.0f * std::cos(angle),
-                        0.0f,
-                        8.0f * std::sin(angle),
-                    };
-                    zg::persistence::StoredNode n{};
-                    n.id           = new_id;
-                    n.position     = spawn;
-                    n.title        = tb_node_title;
-                    n.content      = "";
-                    n.first_seen   = now_ts;
-                    n.last_touched = now_ts;
-                    n.tier         = kToolbarTiers[tb_node_tier_idx];
-                    stored_nodes.push_back(std::move(n));
-                    physics->enqueue_node(spawn);
-                    db->save_graph(stored_nodes, edges);
-                    tb_node_msg = "added " + tb_node_title;
-                    tb_node_title.clear();
-                }
-            }
-            if (!tb_node_msg.empty()) {
-                ImGui::TextDisabled("%s", tb_node_msg.c_str());
-            }
-
-            ImGui::Separator();
-
-            static std::string tb_phantom_label;
-            static std::string tb_phantom_msg;
-            static long long   tb_phantom_id_counter = 1000000;
-
-            ImGui::TextDisabled("inject phantom");
-            const bool phantom_submitted = ImGui::InputText("label##tb_phantom", &tb_phantom_label,
-                                                            ImGuiInputTextFlags_EnterReturnsTrue);
-            if (ImGui::IsItemEdited()) tb_phantom_msg.clear();
-            if (ImGui::Button("inject") || phantom_submitted) {
-                zg::telemetry::Phantom p{};
-                p.id         = tb_phantom_id_counter++;
-                p.position   = {0.0f, 6.0f, 0.0f};
-                p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
-                p.spawn_time = GetTime();
-                phantom_buffer.add(p);
-                tb_phantom_msg = "injected id " + std::to_string(p.id);
-                tb_phantom_label.clear();
-            }
-            if (!tb_phantom_msg.empty()) {
-                ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
-            }
-
-            ImGui::Separator();
-
-            // Journal-as-nodes — timestamped first-class node with tag
-            // "journal". Auto-edged from self (kind 'wrote') and also from
-            // the currently-selected node if any (kind 'concerns') so the
-            // entry threads itself into whatever the operator was looking
-            // at when they wrote it. Memex trails by accident.
-            static std::string tb_journal_text;
-            static std::string tb_journal_msg;
-            ImGui::TextDisabled("journal entry");
-            ImGui::InputTextMultiline("##tb_journal", &tb_journal_text,
-                                      ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4));
-            if (ImGui::IsItemEdited()) tb_journal_msg.clear();
-            if (ImGui::Button("save journal")) {
-                if (tb_journal_text.empty()) {
-                    tb_journal_msg = "entry is empty";
-                } else if (!physics || !db) {
-                    tb_journal_msg = "no active project";
-                } else {
-                    const double now_ts = unix_now();
-                    const std::time_t tt = static_cast<std::time_t>(now_ts);
-                    char tbuf[32];
-                    std::strftime(tbuf, sizeof(tbuf), "journal-%Y%m%d-%H%M%S",
-                                  std::localtime(&tt));
-                    const long long new_id = static_cast<long long>(stored_nodes.size());
-                    // Position near self so journal entries cluster around
-                    // the operator; small angular offset by id keeps them
-                    // from overlapping each other.
-                    const float ang = 0.5f * static_cast<float>(new_id);
-                    Vector3 anchor{0.0f, 0.0f, 0.0f};
-                    if (self_idx < positions.size()) anchor = positions[self_idx];
-                    const Vector3 spawn{
-                        anchor.x + 3.0f * std::cos(ang),
-                        anchor.y + 1.0f + 0.3f * static_cast<float>(new_id % 5),
-                        anchor.z + 3.0f * std::sin(ang),
-                    };
-                    zg::persistence::StoredNode jn{};
-                    jn.id           = new_id;
-                    jn.position     = spawn;
-                    jn.title        = tbuf;
-                    jn.content      = tb_journal_text;
-                    jn.first_seen   = now_ts;
-                    jn.last_touched = now_ts;
-                    jn.tier         = "confirmed";
-                    jn.tags         = {"journal"};
-                    stored_nodes.push_back(std::move(jn));
-                    physics->enqueue_node(spawn);
-
-                    // self -> journal edge (kind "wrote")
-                    if (self_idx < stored_nodes.size()) {
-                        const zg::graph::Edge e_self{
-                            self_idx, static_cast<std::size_t>(new_id),
-                            "wrote", "knows", "confirmed"};
-                        edges.push_back(e_self);
-                        physics->enqueue_edge(e_self);
-                    }
-                    // journal -> selected edge (kind "concerns") if a node
-                    // is currently selected and isn't the journal itself.
-                    if (selected_node >= 0 &&
-                        static_cast<std::size_t>(selected_node) < stored_nodes.size() &&
-                        static_cast<std::size_t>(selected_node) != static_cast<std::size_t>(new_id)) {
-                        const zg::graph::Edge e_about{
-                            static_cast<std::size_t>(new_id),
-                            static_cast<std::size_t>(selected_node),
-                            "concerns", "saw-at", "confirmed"};
-                        edges.push_back(e_about);
-                        physics->enqueue_edge(e_about);
-                    }
-
-                    db->save_graph(stored_nodes, edges);
-                    tb_journal_msg = "saved " + std::string(tbuf);
-                    tb_journal_text.clear();
-                }
-            }
-            if (!tb_journal_msg.empty()) {
-                ImGui::TextDisabled("%s", tb_journal_msg.c_str());
-            }
-
+            zg::ui::render_toolbar_tab(session, phantom_buffer);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Help")) {
-            ImGui::TextDisabled("LEFT-CLICK         select node");
-            ImGui::TextDisabled("RIGHT-DRAG         orbit");
-            ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
-            ImGui::TextDisabled("SCROLL WHEEL       zoom");
-            ImGui::TextDisabled("R KEY              reset view");
-            ImGui::TextDisabled("H KEY              rabbit hole");
-            ImGui::TextDisabled("B KEY              throw the bones");
-            ImGui::TextDisabled("T KEY              timeline collapse");
-            ImGui::TextDisabled("ESC x 3            wipe + exit");
+            zg::ui::render_help_tab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
         }
         ImGui::End();
 
-        // Bones scratch panel — separate ImGui window, opens when a throw
-        // selects a triple and stays open until the operator closes it.
-        // Each chosen-node row is a Selectable: clicking it smooth-flies the
-        // camera to that node and updates the inspector selection.
-        if (bones.panel_open) {
-            // Place the bones panel next to the main window if there's room,
-            // otherwise stack it below so it stays fully on-screen.
-            const float scr_w = static_cast<float>(GetScreenWidth());
-            const float scr_h = static_cast<float>(GetScreenHeight());
-            const bool  side_by_side = scr_w > (main_w + 360.0f + 48.0f);
-            const ImVec2 bones_pos  = side_by_side
-                ? ImVec2(main_w + 32.0f, 16.0f)
-                : ImVec2(16.0f, std::min(main_h + 32.0f, scr_h - 200.0f));
-            const ImVec2 bones_size{
-                std::min(360.0f, scr_w - bones_pos.x - 16.0f),
-                std::min(320.0f, scr_h - bones_pos.y - 16.0f),
-            };
-            ImGui::SetNextWindowPos (bones_pos,  ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(bones_size, ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
-                ImGui::TextDisabled("what connects these?  (click a node to travel)");
-                ImGui::Separator();
-                for (std::size_t slot = 0; slot < bones.chosen.size(); ++slot) {
-                    const auto i = bones.chosen[slot];
-                    if (i >= stored_nodes.size()) continue;
-                    const auto& sn = stored_nodes[i];
-                    char row[320];
-                    std::snprintf(row, sizeof(row), "[%zu] %s##bones-pick-%zu",
-                                  i,
-                                  sn.title.empty() ? "(untitled)" : sn.title.c_str(),
-                                  slot);
-                    if (ImGui::Selectable(row)) {
-                        bones_fly_to_node(bones, i, positions, camera);
-                        selected_node = static_cast<int>(i);
-                    }
-                }
-                ImGui::Separator();
-                ImGui::InputTextMultiline("##bones-scratch", &bones.scratch,
-                                          ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10));
-                if (ImGui::Button("throw again")) {
-                    throw_bones(bones, positions, edges, camera, rabbit_rng);
-                }
-            }
-            ImGui::End();
-        }
+        zg::ui::render_bones_panel(bones, session, camera, main_w, main_h, rabbit_rng);
 
         rlImGuiEnd();
 

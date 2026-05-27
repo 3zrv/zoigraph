@@ -110,6 +110,38 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- app (per-project session state + open_project) ------------------------
+add_library(zg_app STATIC src/app/session.cpp)
+target_include_directories(zg_app PUBLIC src)
+target_link_libraries(zg_app PUBLIC zg_persistence zg_physics_thread zg_graph zg_telemetry)
+
+# ---- ui (ImGui tab renderers) ----------------------------------------------
+add_library(zg_ui STATIC
+    src/ui/toolbar_tab.cpp
+    src/ui/inspector_tab.cpp
+    src/ui/help_tab.cpp
+    src/ui/bones_panel.cpp
+)
+target_include_directories(zg_ui PUBLIC src)
+target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry zg_macros imgui raylib)
+
+# ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
+add_library(zg_macros STATIC
+    src/macros/rabbit_hole.cpp
+    src/macros/bones.cpp
+)
+target_include_directories(zg_macros PUBLIC src)
+target_link_libraries(zg_macros PUBLIC zg_graph raylib)
+
+# ---- render (shaders + imgui theme + camera + small draw helpers) ----------
+add_library(zg_render STATIC
+    src/render/imgui_theme.cpp
+    src/render/camera.cpp
+    src/render/draw.cpp
+)
+target_include_directories(zg_render PUBLIC src)
+target_link_libraries(zg_render PUBLIC imgui raylib)
+
 # ---- input (pure key/event state machines, testable without raylib) --------
 add_library(zg_input STATIC src/input/escape_wipe.cpp)
 target_include_directories(zg_input PUBLIC src)
@@ -165,6 +197,10 @@ target_link_libraries(zoigraph PRIVATE
     zg_persistence
     zg_telemetry
     zg_input
+    zg_render
+    zg_macros
+    zg_app
+    zg_ui
     raylib
     rlimgui
     imgui
