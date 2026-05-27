@@ -35,3 +35,7 @@ add_test(NAME barnes_hut COMMAND test_barnes_hut)
 add_executable(test_picks test_picks.cpp)
 target_link_libraries(test_picks PRIVATE zg_graph doctest::doctest)
 add_test(NAME picks COMMAND test_picks)
+
+add_executable(test_wikilinks test_wikilinks.cpp)
+target_link_libraries(test_wikilinks PRIVATE zg_graph doctest::doctest)
+add_test(NAME wikilinks COMMAND test_wikilinks)

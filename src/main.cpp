@@ -15,6 +15,7 @@
 #include "graph/graph_buffer.h"
 #include "graph/picks.h"
 #include "graph/types.h"
+#include "graph/wikilinks.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
@@ -744,6 +745,38 @@ int main() {
                 db.update_node_text(sn.id, sn.title, sn.content);
                 // The query may now have new hits.
                 search_hits = db.search(search_query);
+
+                // Wikilinks: parse [[title]] occurrences out of the content
+                // and materialize them as edges from this node to whichever
+                // existing node has a matching title. Skip duplicates so
+                // re-saving doesn't fan out parallel edges. Edge persists
+                // via the explicit save button or shutdown save.
+                const auto refs = zg::graph::extract_wikilinks(sn.content);
+                for (const std::string& title : refs) {
+                    if (title.empty()) continue;
+                    std::size_t target_idx = SIZE_MAX;
+                    for (std::size_t k = 0; k < stored_nodes.size(); ++k) {
+                        if (stored_nodes[k].title == title) {
+                            target_idx = k;
+                            break;
+                        }
+                    }
+                    if (target_idx == SIZE_MAX) continue;
+                    if (target_idx == static_cast<std::size_t>(selected_node)) continue;
+                    const std::size_t src_idx = static_cast<std::size_t>(selected_node);
+                    bool exists = false;
+                    for (const auto& e : edges) {
+                        if ((e.source == src_idx && e.target == target_idx) ||
+                            (e.source == target_idx && e.target == src_idx)) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (exists) continue;
+                    const zg::graph::Edge link_edge{src_idx, target_idx};
+                    edges.push_back(link_edge);
+                    physics.enqueue_edge(link_edge);
+                }
             }
 
             if (ImGui::Button("save to disk")) {
