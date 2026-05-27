@@ -93,6 +93,23 @@ TEST_CASE("escape_wipe: zero window only triggers when all stamps are equal") {
     CHECK_FALSE(w2.record(100.000001, 0.0));  // tiny drift defeats zero window
 }
 
+TEST_CASE("escape_wipe: count_recent after a fire reflects only post-fire activity") {
+    // After three presses fire the wipe, the stamps array holds those three.
+    // A fresh press overwrites one slot; count_recent at a later time
+    // should reflect the actual age of each stamp, not freeze at 3.
+    EscapeWipe w;
+    w.record(100.0, 1.0);
+    w.record(100.2, 1.0);
+    CHECK(w.record(100.4, 1.0));  // fires
+
+    // Long gap — all three stamps are stale.
+    CHECK(w.count_recent(500.0, 1.0) == 0);
+
+    // One fresh press: 1 of 3 stamps is current.
+    w.record(500.0, 1.0);
+    CHECK(w.count_recent(500.1, 1.0) == 1);
+}
+
 TEST_CASE("escape_wipe: configurable window") {
     EscapeWipe w;
     w.record(100.0, 0.2);

@@ -77,6 +77,30 @@ TEST_CASE("picks: fully-connected graph still returns 3 distinct nodes (fallback
     CHECK(all_distinct(pick));
 }
 
+TEST_CASE("picks: edge direction doesn't matter for adjacency") {
+    // An edge stored {A, B} should make the pair (A, B) adjacent regardless
+    // of the order the picker considers them. Verify by feeding the picker
+    // a small graph where every undirected pair has exactly one stored
+    // direction and asserting it never returns an adjacent triple.
+    std::vector<Edge> edges = {{0, 1}, {2, 0}, {3, 1}};  // mixed source/target
+    std::mt19937 rng(2025);
+    for (int trial = 0; trial < 30; ++trial) {
+        const auto pick = pick_weakly_connected_triple(5, edges, rng);
+        REQUIRE(pick.size() == 3);
+        // None of (pick[0],pick[1]), (pick[0],pick[2]), (pick[1],pick[2])
+        // should equal any of the edges, in either direction.
+        for (std::size_t i = 0; i < 3; ++i) {
+            for (std::size_t j = i + 1; j < 3; ++j) {
+                for (const Edge& e : edges) {
+                    const bool match = (e.source == pick[i] && e.target == pick[j]) ||
+                                       (e.source == pick[j] && e.target == pick[i]);
+                    REQUIRE_FALSE(match);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("picks: same seed produces the same triple (determinism)") {
     // Determinism over a fixed seed lets future features replay or test
     // bones throws against a known answer.

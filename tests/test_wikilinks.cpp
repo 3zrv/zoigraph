@@ -75,6 +75,17 @@ TEST_CASE("wikilinks: single brackets inside an open [[ are kept in the target")
     CHECK(out[0] == "some [bracketed] text");
 }
 
+TEST_CASE("wikilinks: opening [[ at the very end of content is silently dropped") {
+    CHECK(extract_wikilinks("hello [[").empty());
+    CHECK(extract_wikilinks("hello [").empty());
+}
+
+TEST_CASE("wikilinks: closing ]] right at the end is captured") {
+    const auto out = extract_wikilinks("[[node-x]]");
+    REQUIRE(out.size() == 1);
+    CHECK(out[0] == "node-x");
+}
+
 TEST_CASE("wikilinks: many links in a long content blob") {
     std::string content;
     for (int i = 0; i < 200; ++i) {

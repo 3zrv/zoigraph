@@ -353,6 +353,24 @@ TEST_CASE("PhysicsThread: start and stop are idempotent") {
     physics.stop();
 }
 
+TEST_CASE("PhysicsThread: hundred enqueue_node calls in a burst all land") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    for (int i = 0; i < 100; ++i) {
+        physics.enqueue_node({static_cast<float>(i), 0.0f, 0.0f});
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(positions.size() == 101);
+}
+
 TEST_CASE("PhysicsThread: enqueue_node before start() is picked up at first tick") {
     GraphBuffer buffer;
     PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);

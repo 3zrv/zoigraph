@@ -456,6 +456,30 @@ TEST_CASE("db: 500-node save/load roundtrip stays correct + reasonably fast") {
     CHECK(out[42].first_seen == doctest::Approx(1042.0));
 }
 
+TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+
+    db.update_node_tier(1, "");
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].tier.empty());
+}
+
+TEST_CASE("db: 4KB title roundtrips byte-exact") {
+    Database db(":memory:");
+    std::string long_title(4096, 'A');
+    db.save_graph({{1, {0,0,0}, long_title, ""}}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].title.size() == 4096);
+    CHECK(out[0].title == long_title);
+}
+
 TEST_CASE("db: search query containing punctuation sanitizes safely") {
     // The parser strips anything non-alphanumeric, so "it's" becomes "it s"
     // → "it* s*". A naive concatenation into the FTS5 query string without

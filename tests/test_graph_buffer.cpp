@@ -81,6 +81,17 @@ TEST_CASE("graph_buffer: snapshot is non-destructive (same result on a second ca
     CHECK(e1[0].source == e2[0].source);
 }
 
+TEST_CASE("graph_buffer: publish_positions with empty vector clears the buffer") {
+    GraphBuffer buf;
+    buf.publish_positions({{1, 1, 1}, {2, 2, 2}});
+    buf.publish_positions({});
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buf.snapshot(positions, edges);
+    CHECK(positions.empty());
+}
+
 TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
     GraphBuffer buf;
     buf.set_edges({{0, 1}, {1, 2}});

@@ -203,6 +203,15 @@ TEST_CASE("parse_phantom: connections may include negative ids (no sign filter)"
     CHECK(p->connections[2] == -99);
 }
 
+TEST_CASE("parse_phantom: connections with very large id values are accepted") {
+    // long long can hold up to ~9.2e18.
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"connections":[9223372036854775806]})");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 1);
+    CHECK(p->connections[0] == 9223372036854775806LL);
+}
+
 TEST_CASE("parse_phantom: 100-entry connections array round-trips") {
     std::string payload = R"({"id":1,"x":0,"y":0,"z":0,"connections":[)";
     for (int i = 0; i < 100; ++i) {
