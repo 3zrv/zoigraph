@@ -1053,12 +1053,18 @@ int main() {
             }
             ImGui::Text("edges (%d incident)", incident_count);
 
-            // Kind picker: ImGui::Combo with an empty-string entry renders a
-            // blank, unclickable row. Display "(none)" but store "" in the
-            // Edge.kind field so the on-disk schema stays unchanged.
-            static const char* kKindLabels[] = {"(none)", "knows", "owns", "saw-at", "shell-of", "suspected"};
-            static const char* kKindValues[] = {"",       "knows", "owns", "saw-at", "shell-of", "suspected"};
+            // Edge editor — flat layout, no CollapsingHeader.  Each row is
+            // its own ImGui::PushID scope so the label/kind/certainty
+            // widgets get unique IDs per edge.  A persistent edit_counter
+            // ticks every time a change registers; if you edit and the
+            // counter doesn't move, the change isn't being detected.
+            static const char* kKindLabels[]  = {"(none)", "knows", "owns", "saw-at", "shell-of", "suspected"};
+            static const char* kKindValues[]  = {"",       "knows", "owns", "saw-at", "shell-of", "suspected"};
             static const char* kCertainties[] = {"confirmed", "suspected", "hearsay", "phantom"};
+            static int edge_edit_counter = 0;
+            ImGui::TextDisabled("edge edits registered: %d", edge_edit_counter);
+            ImGui::Spacing();
+
             for (std::size_t i = 0; i < edges.size(); ++i) {
                 auto& e = edges[i];
                 if (e.source != sel && e.target != sel) continue;
@@ -1067,24 +1073,29 @@ int main() {
                                           ? stored_nodes[other].title.c_str()
                                           : "(untitled)";
                 ImGui::PushID(static_cast<int>(i));
-                char header[256];
-                std::snprintf(header, sizeof(header), "-> %zu  %s", other, other_title);
-                if (ImGui::CollapsingHeader(header)) {
-                    bool changed = false;
-                    changed |= ImGui::InputText("label", &e.label);
-                    int kind_idx = 0;
-                    for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }
-                    if (ImGui::Combo("kind", &kind_idx, kKindLabels, 6)) {
-                        e.kind = kKindValues[kind_idx];
-                        changed = true;
-                    }
-                    int c_idx = 0;
-                    for (int k = 0; k < 4; ++k) if (e.certainty == kCertainties[k]) { c_idx = k; break; }
-                    if (ImGui::Combo("certainty", &c_idx, kCertainties, 4)) {
-                        e.certainty = kCertainties[c_idx];
-                        changed = true;
-                    }
-                    if (changed) db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
+                ImGui::Separator();
+                ImGui::Text("-> %zu  %s", other, other_title);
+
+                bool changed = false;
+                if (ImGui::InputText("label", &e.label))    changed = true;
+
+                int kind_idx = 0;
+                for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }
+                if (ImGui::Combo("kind", &kind_idx, kKindLabels, 6)) {
+                    e.kind = kKindValues[kind_idx];
+                    changed = true;
+                }
+
+                int c_idx = 0;
+                for (int k = 0; k < 4; ++k) if (e.certainty == kCertainties[k]) { c_idx = k; break; }
+                if (ImGui::Combo("certainty", &c_idx, kCertainties, 4)) {
+                    e.certainty = kCertainties[c_idx];
+                    changed = true;
+                }
+
+                if (changed) {
+                    ++edge_edit_counter;
+                    db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
                 }
                 ImGui::PopID();
             }
