@@ -707,6 +707,21 @@ int main() {
             } else if (tier == "phantom") {
                 DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
             }
+
+            // Tag halo: nodes with at least one tag get an additional ring
+            // colored by a hash of the first tag's name. Layered with the
+            // tier halo above so both signals are readable.
+            if (!stored_nodes[i].tags.empty()) {
+                const std::string& tag = stored_nodes[i].tags.front();
+                const std::size_t h = std::hash<std::string>{}(tag);
+                const Color tag_col{
+                    static_cast<unsigned char>(0x60 | ((h >>  0) & 0x9F)),
+                    static_cast<unsigned char>(0x60 | ((h >>  8) & 0x9F)),
+                    static_cast<unsigned char>(0x60 | ((h >> 16) & 0x9F)),
+                    255,
+                };
+                DrawSphereWires(positions[i], kNodeRadius * 1.2f, 6, 6, tag_col);
+            }
         }
 
         if (selected_node >= 0 && static_cast<std::size_t>(selected_node) < positions.size()) {
@@ -951,6 +966,41 @@ int main() {
             if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
                 sn.tier = kTiers[tier_idx];
                 db->update_node_tier(sn.id, sn.tier);
+            }
+
+            // Tag chips: each existing tag renders as a small "<tag> x"
+            // button. Clicking removes the tag and persists the new set.
+            ImGui::TextDisabled("tags");
+            int remove_idx = -1;
+            for (std::size_t ti = 0; ti < sn.tags.size(); ++ti) {
+                ImGui::PushID(static_cast<int>(ti));
+                const std::string chip = sn.tags[ti] + " x";
+                if (ImGui::SmallButton(chip.c_str())) {
+                    remove_idx = static_cast<int>(ti);
+                }
+                ImGui::PopID();
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+            if (remove_idx >= 0) {
+                sn.tags.erase(sn.tags.begin() + remove_idx);
+                db->update_node_tags(sn.id, sn.tags);
+            }
+            static std::string new_tag;
+            const bool tag_submit = ImGui::InputText("add tag", &new_tag,
+                                                     ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            const bool tag_click = ImGui::SmallButton("+##tag");
+            if (tag_submit || tag_click) {
+                if (!new_tag.empty()) {
+                    // Dedup before adding so the chip row doesn't grow
+                    // visual duplicates that the DB would silently dedup.
+                    if (std::find(sn.tags.begin(), sn.tags.end(), new_tag) == sn.tags.end()) {
+                        sn.tags.push_back(new_tag);
+                        db->update_node_tags(sn.id, sn.tags);
+                    }
+                    new_tag.clear();
+                }
             }
 
             // Timestamps — read-only display. 0 means "unknown" (legacy row

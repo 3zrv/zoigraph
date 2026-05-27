@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -616,6 +617,112 @@ TEST_CASE("db: edge label of 4 KB roundtrips byte-exact") {
     REQUIRE(edges.size() == 1);
     CHECK(edges[0].label.size() == 4096);
     CHECK(edges[0].label == huge_label);
+}
+
+TEST_CASE("db: node tags roundtrip through save_graph and load_graph") {
+    Database db(":memory:");
+    StoredNode n1{};
+    n1.id = 1; n1.position = {0,0,0}; n1.title = "alpha";
+    n1.tags = {"subject", "asset"};
+    StoredNode n2{};
+    n2.id = 2; n2.position = {0,0,0}; n2.title = "beta";
+    n2.tags = {};  // no tags
+    StoredNode n3{};
+    n3.id = 3; n3.position = {0,0,0}; n3.title = "gamma";
+    n3.tags = {"hostile"};
+
+    db.save_graph({n1, n2, n3}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 3);
+    CHECK(out[0].tags.size() == 2);
+    CHECK((out[0].tags[0] == "subject" || out[0].tags[0] == "asset"));
+    CHECK(out[1].tags.empty());
+    REQUIRE(out[2].tags.size() == 1);
+    CHECK(out[2].tags[0] == "hostile");
+}
+
+TEST_CASE("db: duplicate tags within a node's list collapse to one stored row") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"asset", "asset", "asset"};  // 3 copies
+    db.save_graph({n}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    // The PK (node_id, tag) collapses dup inserts; loaded set has just one.
+    CHECK(out[0].tags.size() == 1);
+    CHECK(out[0].tags[0] == "asset");
+}
+
+TEST_CASE("db: update_node_tags atomically replaces the tag set") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"old1", "old2"};
+    db.save_graph({n}, {});
+
+    db.update_node_tags(1, {"new1", "new2", "new3"});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].tags.size() == 3);
+    std::sort(out[0].tags.begin(), out[0].tags.end());
+    CHECK(out[0].tags[0] == "new1");
+    CHECK(out[0].tags[1] == "new2");
+    CHECK(out[0].tags[2] == "new3");
+}
+
+TEST_CASE("db: update_node_tags with empty vector clears all tags") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1; n.position = {0,0,0}; n.title = "a";
+    n.tags = {"keep", "kill"};
+    db.save_graph({n}, {});
+
+    db.update_node_tags(1, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    CHECK(out[0].tags.empty());
+}
+
+TEST_CASE("db: tags survive a legacy DB without node_tags table (migration creates it)") {
+    const std::string path = "/tmp/zg_tags_migrate_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    // Legacy schema: no node_tags.
+    {
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        sqlite3_exec(raw,
+            "CREATE TABLE nodes ("
+            "  id INTEGER PRIMARY KEY, x REAL, y REAL, z REAL,"
+            "  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '');"
+            "INSERT INTO nodes (id, x, y, z, title, content) VALUES (1, 0, 0, 0, 'legacy', '');",
+            nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+    }
+
+    Database db(path);
+    db.update_node_tags(1, {"freshly-added"});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(out, edges));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].tags.size() == 1);
+    CHECK(out[0].tags[0] == "freshly-added");
+
+    std::remove(path.c_str());
 }
 
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
