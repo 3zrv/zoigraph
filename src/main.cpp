@@ -466,26 +466,34 @@ int main() {
     std::unique_ptr<zg::persistence::Database>    db;
     std::unique_ptr<zg::physics::PhysicsThread>   physics;
     std::vector<zg::persistence::StoredNode>      stored_nodes;
-    std::vector<zg::graph::Edge>                  edges_persisted;  // saved on switch
     std::string                                   current_project;
+
+    // Render-loop workspace — owned by main, NOT refilled from the buffer
+    // each frame. Physics publishes positions; main owns edges. Edge
+    // metadata edits (label / kind / certainty) live here and would be
+    // clobbered if we snapshotted them back from the buffer.
+    std::vector<Vector3>         positions;
+    std::vector<zg::graph::Edge> edges;
+    std::vector<Matrix>          transforms;
+    transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
         // Save and tear down the current session if there is one.
         if (physics) {
             physics->stop();
             std::vector<Vector3> final_positions;
-            std::vector<zg::graph::Edge> final_edges;
-            buffer.snapshot(final_positions, final_edges);
+            buffer.snapshot(final_positions);
             for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
                 stored_nodes[i].position = final_positions[i];
             }
-            if (db) db->save_graph(stored_nodes, final_edges);
+            if (db) db->save_graph(stored_nodes, edges);
             physics.reset();
         }
         db.reset();
         phantom_buffer.clear();
         stored_nodes.clear();
-        edges_persisted.clear();
+        edges.clear();
+        positions.clear();
 
         current_project = name;
         zg::persistence::write_last_project(kProjectsDir, name);
@@ -507,7 +515,10 @@ int main() {
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         }
-        edges_persisted = initial_edges;
+        // Seed main's render-loop state from what's about to be handed to
+        // physics. From here on these belong to main.
+        positions = initial_positions;
+        edges     = initial_edges;
         physics = std::make_unique<zg::physics::PhysicsThread>(
             std::move(initial_positions),
             initial_edges,
@@ -519,11 +530,6 @@ int main() {
     // Ensure there's at least one project. If projects/ is empty, "default"
     // will be auto-created by open_project's fresh-DB branch.
     open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
-
-    std::vector<Vector3>         positions;
-    std::vector<zg::graph::Edge> edges;
-    std::vector<Matrix>          transforms;
-    transforms.reserve(512);  // headroom for typical project sizes
 
     int                              selected_node = -1;
     std::string                      search_query;
@@ -585,7 +591,9 @@ int main() {
         } else {
             update_orbit_camera(camera);
         }
-        buffer.snapshot(positions, edges);
+        // Positions-only snapshot — edges are owned by main so the buffer
+        // doesn't clobber operator edits to label / kind / certainty.
+        buffer.snapshot(positions);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Raypick on left-click, but only when ImGui isn't already eating the
@@ -1253,13 +1261,12 @@ int main() {
     // the vector — click-to-pin nodes are already in stored_nodes and
     // would be lost by a naive resize+id-assign.
     if (db) {
-        std::vector<Vector3>         final_positions;
-        std::vector<zg::graph::Edge> final_edges;
-        buffer.snapshot(final_positions, final_edges);
+        std::vector<Vector3> final_positions;
+        buffer.snapshot(final_positions);
         for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
             stored_nodes[i].position = final_positions[i];
         }
-        db->save_graph(stored_nodes, final_edges);
+        db->save_graph(stored_nodes, edges);
     }
     physics.reset();
     db.reset();
