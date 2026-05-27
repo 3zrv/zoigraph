@@ -110,6 +110,10 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- input (pure key/event state machines, testable without raylib) --------
+add_library(zg_input STATIC src/input/escape_wipe.cpp)
+target_include_directories(zg_input PUBLIC src)
+
 # ---- graph (thread-safe buffer between physics and render) -----------------
 add_library(zg_graph STATIC
     src/graph/graph_buffer.cpp
@@ -154,6 +158,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_physics_thread
     zg_persistence
     zg_telemetry
+    zg_input
     raylib
     rlimgui
     imgui

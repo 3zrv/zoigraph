@@ -18,6 +18,7 @@
 #include "graph/picks.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
+#include "input/escape_wipe.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
@@ -443,6 +444,9 @@ int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(kWidth, kHeight, "zoigraph");
     SetTargetFPS(144);
+    // Raylib defaults to ESC-to-quit; disable so the triple-escape wipe
+    // gets the keypresses instead.
+    SetExitKey(KEY_NULL);
 
     rlImGuiSetup(true);
     apply_terminal_theme();
@@ -483,18 +487,36 @@ int main() {
         initial_positions.reserve(stored_nodes.size());
         for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
     } else {
-        initial_positions = make_initial_positions(kNodeCount);
-        initial_edges     = make_random_edges(kNodeCount, kEdgeCount);
-        stored_nodes.reserve(initial_positions.size());
+        // Fresh DB: self node at id 0, anchored at origin, distinct tier.
+        // Then kNodeCount random nodes at ids 1..N. Random edges shift up
+        // by one so they reference the random nodes, never self.
         const double now_ts = unix_now();
-        for (std::size_t i = 0; i < initial_positions.size(); ++i) {
+        zg::persistence::StoredNode self_node{};
+        self_node.id           = 0;
+        self_node.position     = {0.0f, 0.0f, 0.0f};
+        self_node.title        = "self";
+        self_node.content      = "the operator";
+        self_node.first_seen   = now_ts;
+        self_node.last_touched = now_ts;
+        self_node.tier         = "self";
+        stored_nodes.push_back(std::move(self_node));
+        initial_positions.push_back({0.0f, 0.0f, 0.0f});
+
+        auto random_positions = make_initial_positions(kNodeCount);
+        for (std::size_t i = 0; i < random_positions.size(); ++i) {
+            initial_positions.push_back(random_positions[i]);
             zg::persistence::StoredNode n{};
-            n.id           = static_cast<long long>(i);
-            n.position     = initial_positions[i];
+            n.id           = static_cast<long long>(i + 1);
+            n.position     = random_positions[i];
             n.first_seen   = now_ts;
             n.last_touched = now_ts;
             n.tier         = "confirmed";
             stored_nodes.push_back(std::move(n));
+        }
+        initial_edges = make_random_edges(kNodeCount, kEdgeCount);
+        for (auto& e : initial_edges) {
+            e.source += 1;
+            e.target += 1;
         }
     }
 
@@ -523,8 +545,17 @@ int main() {
     RabbitHole                       rabbit;
     Bones                            bones;
     std::mt19937                     rabbit_rng(std::random_device{}());
+    zg::input::EscapeWipe            esc_wipe;
+    bool                             requested_exit = false;
 
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && !requested_exit) {
+        // Triple-Escape wipe — three ESC presses within 1 second triggers a
+        // clean shutdown. (When SQLCipher lands this is where the key buffer
+        // gets zeroed before the DB closes.)
+        if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), 1.0)) {
+            requested_exit = true;
+        }
+
         if (IsWindowResized()) {
             UnloadRenderTexture(scene_rt);
             scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
@@ -658,9 +689,12 @@ int main() {
         // Tier indicators: every non-confirmed node gets a small wireframe
         // halo whose color reflects its tier. Confirmed nodes stay bare
         // (the bulk of the field) so the few tiered ones pop visually.
+        // Self gets a bigger, always-visible green halo.
         for (std::size_t i = 0; i < positions.size() && i < stored_nodes.size(); ++i) {
             const auto& tier = stored_nodes[i].tier;
-            if (tier == "suspected") {
+            if (tier == "self") {
+                DrawSphereWires(positions[i], kNodeRadius * 2.0f, 12, 12, GREEN);
+            } else if (tier == "suspected") {
                 DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, ORANGE);
             } else if (tier == "phantom") {
                 DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
@@ -776,12 +810,12 @@ int main() {
 
             // Tier picker: drives halo color in the 3D view and persists
             // immediately on change (no save-to-disk required).
-            static const char* kTiers[] = {"confirmed", "suspected", "phantom"};
+            static const char* kTiers[] = {"confirmed", "suspected", "phantom", "self"};
             int tier_idx = 0;
-            for (int t = 0; t < 3; ++t) {
+            for (int t = 0; t < 4; ++t) {
                 if (sn.tier == kTiers[t]) { tier_idx = t; break; }
             }
-            if (ImGui::Combo("tier", &tier_idx, kTiers, 3)) {
+            if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
                 sn.tier = kTiers[tier_idx];
                 db.update_node_tier(sn.id, sn.tier);
             }
@@ -882,6 +916,7 @@ int main() {
         ImGui::TextDisabled("R KEY              reset view");
         ImGui::TextDisabled("H KEY              rabbit hole");
         ImGui::TextDisabled("B KEY              throw the bones");
+        ImGui::TextDisabled("ESC x 3            wipe + exit");
         ImGui::End();
 
         // Bones scratch panel — separate ImGui window, opens when a throw

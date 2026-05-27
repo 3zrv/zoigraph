@@ -39,3 +39,7 @@ add_test(NAME picks COMMAND test_picks)
 add_executable(test_wikilinks test_wikilinks.cpp)
 target_link_libraries(test_wikilinks PRIVATE zg_graph doctest::doctest)
 add_test(NAME wikilinks COMMAND test_wikilinks)
+
+add_executable(test_escape_wipe test_escape_wipe.cpp)
+target_link_libraries(test_escape_wipe PRIVATE zg_input doctest::doctest)
+add_test(NAME escape_wipe COMMAND test_escape_wipe)
