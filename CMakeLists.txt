@@ -14,6 +14,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Opt-in AddressSanitizer build: `cmake -S . -B build -DZG_ASAN=ON`
+# Applies globally so every TU (including FetchContent deps and tests) shares
+# the same ASAN runtime — partial instrumentation breaks linking.
+option(ZG_ASAN "Build zoigraph with AddressSanitizer" OFF)
+if(ZG_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+endif()
+
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
@@ -155,6 +164,7 @@ target_include_directories(zoigraph PRIVATE src)
 if(NOT WIN32)
     target_link_libraries(zoigraph PRIVATE pthread)
 endif()
+
 
 # ---- tests -----------------------------------------------------------------
 enable_testing()
