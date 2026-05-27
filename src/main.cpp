@@ -684,10 +684,17 @@ int main() {
                               static_cast<int>(transforms.size()));
         }
 
+        // Edges with alpha keyed to certainty: confirmed/suspected/hearsay/
+        // phantom fade progressively. Empty certainty (legacy edges) is
+        // treated as confirmed.
         for (const auto& e : edges) {
-            if (e.source < positions.size() && e.target < positions.size()) {
-                DrawLine3D(positions[e.source], positions[e.target], MAROON);
-            }
+            if (e.source >= positions.size() || e.target >= positions.size()) continue;
+            unsigned char alpha = 255;
+            if      (e.certainty == "suspected") alpha = 180;
+            else if (e.certainty == "hearsay")   alpha = 100;
+            else if (e.certainty == "phantom")   alpha = 50;
+            const Color line_color{MAROON.r, MAROON.g, MAROON.b, alpha};
+            DrawLine3D(positions[e.source], positions[e.target], line_color);
         }
 
         // Tier indicators: every non-confirmed node gets a small wireframe
@@ -767,6 +774,27 @@ int main() {
         DrawTexturePro(scene_rt.texture, src, dst, {0, 0}, 0.0f, WHITE);
         if (post_process) {
             EndShaderMode();
+        }
+
+        // Edge labels — drawn AFTER the CRT composite so they stay crisp
+        // and BEFORE ImGui so the inspector can sit on top of them. Skip
+        // labels whose midpoint is behind the camera (GetWorldToScreen
+        // returns nonsense for those).
+        {
+            const Vector3 cam_forward = Vector3Subtract(camera.target, camera.position);
+            for (const auto& e : edges) {
+                if (e.label.empty()) continue;
+                if (e.source >= positions.size() || e.target >= positions.size()) continue;
+                const Vector3 mid     = Vector3Lerp(positions[e.source], positions[e.target], 0.5f);
+                const Vector3 to_mid  = Vector3Subtract(mid, camera.position);
+                if (Vector3DotProduct(to_mid, cam_forward) <= 0.0f) continue;
+                const Vector2 screen = GetWorldToScreen(mid, camera);
+                const int tw = MeasureText(e.label.c_str(), 12);
+                DrawText(e.label.c_str(),
+                         static_cast<int>(screen.x) - tw / 2,
+                         static_cast<int>(screen.y) - 7,
+                         12, GRAY);
+            }
         }
 
         rlImGuiBegin();
@@ -911,6 +939,50 @@ int main() {
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("deselect")) selected_node = -1;
+
+            // Incident edges — list every edge touching the selected node
+            // with editable label / kind / certainty. Updates persist
+            // immediately via update_edge; no save-button needed.
+            ImGui::Spacing();
+            ImGui::Separator();
+            const std::size_t sel = static_cast<std::size_t>(selected_node);
+            int incident_count = 0;
+            for (const auto& e : edges) {
+                if (e.source == sel || e.target == sel) ++incident_count;
+            }
+            ImGui::Text("edges (%d incident)", incident_count);
+
+            static const char* kKinds[]       = {"", "knows", "owns", "saw-at", "shell-of", "suspected"};
+            static const char* kCertainties[] = {"confirmed", "suspected", "hearsay", "phantom"};
+            for (std::size_t i = 0; i < edges.size(); ++i) {
+                auto& e = edges[i];
+                if (e.source != sel && e.target != sel) continue;
+                const std::size_t other = (e.source == sel) ? e.target : e.source;
+                const char* other_title = (other < stored_nodes.size() && !stored_nodes[other].title.empty())
+                                          ? stored_nodes[other].title.c_str()
+                                          : "(untitled)";
+                ImGui::PushID(static_cast<int>(i));
+                char header[256];
+                std::snprintf(header, sizeof(header), "-> %zu  %s", other, other_title);
+                if (ImGui::CollapsingHeader(header)) {
+                    bool changed = false;
+                    changed |= ImGui::InputText("label", &e.label);
+                    int kind_idx = 0;
+                    for (int k = 0; k < 6; ++k) if (e.kind == kKinds[k]) { kind_idx = k; break; }
+                    if (ImGui::Combo("kind", &kind_idx, kKinds, 6)) {
+                        e.kind = kKinds[kind_idx];
+                        changed = true;
+                    }
+                    int c_idx = 0;
+                    for (int k = 0; k < 4; ++k) if (e.certainty == kCertainties[k]) { c_idx = k; break; }
+                    if (ImGui::Combo("certainty", &c_idx, kCertainties, 4)) {
+                        e.certainty = kCertainties[c_idx];
+                        changed = true;
+                    }
+                    if (changed) db.update_edge(e.source, e.target, e.label, e.kind, e.certainty);
+                }
+                ImGui::PopID();
+            }
         } else {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");

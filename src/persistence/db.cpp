@@ -28,9 +28,12 @@ CREATE TABLE IF NOT EXISTS nodes (
     tier         TEXT    NOT NULL DEFAULT 'confirmed'
 );
 CREATE TABLE IF NOT EXISTS edges (
-    source INTEGER NOT NULL,
-    target INTEGER NOT NULL,
-    weight REAL    NOT NULL DEFAULT 1.0
+    source    INTEGER NOT NULL,
+    target    INTEGER NOT NULL,
+    weight    REAL    NOT NULL DEFAULT 1.0,
+    label     TEXT    NOT NULL DEFAULT '',
+    kind      TEXT    NOT NULL DEFAULT '',
+    certainty TEXT    NOT NULL DEFAULT 'confirmed'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
@@ -107,6 +110,23 @@ Database::Database(const std::string& path) : db_(nullptr) {
     if (!column_exists("last_touched")) exec("ALTER TABLE nodes ADD COLUMN last_touched REAL NOT NULL DEFAULT 0.0;");
     if (!column_exists("tier"))         exec("ALTER TABLE nodes ADD COLUMN tier TEXT NOT NULL DEFAULT 'confirmed';");
 
+    // Same migration check for edges metadata columns. Legacy DBs from
+    // before the label/kind/certainty work get the columns added with
+    // sane defaults; new DBs already have them via kSchema.
+    auto edge_column_exists = [this](const char* col) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT 1 FROM pragma_table_info('edges') WHERE name = ?;",
+                -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, col, -1, SQLITE_TRANSIENT);
+        const bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+        return found;
+    };
+    if (!edge_column_exists("label"))     exec("ALTER TABLE edges ADD COLUMN label TEXT NOT NULL DEFAULT '';");
+    if (!edge_column_exists("kind"))      exec("ALTER TABLE edges ADD COLUMN kind TEXT NOT NULL DEFAULT '';");
+    if (!edge_column_exists("certainty")) exec("ALTER TABLE edges ADD COLUMN certainty TEXT NOT NULL DEFAULT 'confirmed';");
+
     // Catch up the FTS index against the current nodes table. No-op if the
     // triggers have been keeping it consistent; mandatory after a schema
     // upgrade from a pre-FTS5 build.
@@ -160,14 +180,18 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
 
         sqlite3_stmt* ins_edge = nullptr;
         if (sqlite3_prepare_v2(db_,
-                "INSERT INTO edges (source, target, weight) VALUES (?,?,?);",
+                "INSERT INTO edges (source, target, weight, label, kind, certainty) "
+                "VALUES (?,?,?,?,?,?);",
                 -1, &ins_edge, nullptr) != SQLITE_OK) {
             throw_sqlite(db_, "prepare INSERT edges");
         }
         for (const graph::Edge& e : edges) {
-            sqlite3_bind_int64(ins_edge, 1, static_cast<long long>(e.source));
-            sqlite3_bind_int64(ins_edge, 2, static_cast<long long>(e.target));
+            sqlite3_bind_int64 (ins_edge, 1, static_cast<long long>(e.source));
+            sqlite3_bind_int64 (ins_edge, 2, static_cast<long long>(e.target));
             sqlite3_bind_double(ins_edge, 3, 1.0);
+            sqlite3_bind_text  (ins_edge, 4, e.label.c_str(),     -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text  (ins_edge, 5, e.kind.c_str(),      -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text  (ins_edge, 6, e.certainty.c_str(), -1, SQLITE_TRANSIENT);
             if (sqlite3_step(ins_edge) != SQLITE_DONE) {
                 sqlite3_finalize(ins_edge);
                 throw_sqlite(db_, "step INSERT edges");
@@ -217,7 +241,7 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
 
     sqlite3_stmt* q_edges = nullptr;
     if (sqlite3_prepare_v2(db_,
-            "SELECT source, target FROM edges;",
+            "SELECT source, target, label, kind, certainty FROM edges;",
             -1, &q_edges, nullptr) != SQLITE_OK) {
         throw_sqlite(db_, "prepare SELECT edges");
     }
@@ -225,7 +249,10 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
         graph::Edge e{};
         e.source = static_cast<std::size_t>(sqlite3_column_int64(q_edges, 0));
         e.target = static_cast<std::size_t>(sqlite3_column_int64(q_edges, 1));
-        edges.push_back(e);
+        if (const unsigned char* l = sqlite3_column_text(q_edges, 2)) e.label     = reinterpret_cast<const char*>(l);
+        if (const unsigned char* k = sqlite3_column_text(q_edges, 3)) e.kind      = reinterpret_cast<const char*>(k);
+        if (const unsigned char* c = sqlite3_column_text(q_edges, 4)) e.certainty = reinterpret_cast<const char*>(c);
+        edges.push_back(std::move(e));
     }
     sqlite3_finalize(q_edges);
 
@@ -247,6 +274,29 @@ void Database::update_node_text(long long id, const std::string& title,
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         throw_sqlite(db_, "step UPDATE nodes");
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::update_edge(std::size_t source, std::size_t target,
+                           const std::string& label,
+                           const std::string& kind,
+                           const std::string& certainty) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "UPDATE edges SET label = ?, kind = ?, certainty = ? "
+            "WHERE source = ? AND target = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare UPDATE edges");
+    }
+    sqlite3_bind_text (stmt, 1, label.c_str(),     -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, kind.c_str(),      -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, certainty.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 4, static_cast<long long>(source));
+    sqlite3_bind_int64(stmt, 5, static_cast<long long>(target));
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step UPDATE edges");
     }
     sqlite3_finalize(stmt);
 }

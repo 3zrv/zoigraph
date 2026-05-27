@@ -58,6 +58,14 @@ public:
     // Updates only the tier field on one node. No FTS impact.
     void update_node_tier(long long id, const std::string& tier);
 
+    // Updates label/kind/certainty on the single edge identified by
+    // (source, target). Silently does nothing if no matching edge exists.
+    // No-op for callers passing strings that don't change anything.
+    void update_edge(std::size_t source, std::size_t target,
+                     const std::string& label,
+                     const std::string& kind,
+                     const std::string& certainty);
+
 private:
     void exec(const char* sql);
 
