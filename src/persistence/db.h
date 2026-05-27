@@ -16,6 +16,9 @@ struct StoredNode {
     Vector3     position;
     std::string title;
     std::string content;
+    double      first_seen   = 0.0;            // Unix seconds; 0 == unknown
+    double      last_touched = 0.0;            // Unix seconds; bumped on edits
+    std::string tier         = "confirmed";    // "confirmed" / "suspected" / "phantom"
 };
 
 // Thin wrapper around a SQLite connection. The schema is the eventual home
@@ -46,10 +49,14 @@ public:
     // (or one that sanitizes to nothing) returns no results.
     std::vector<long long> search(const std::string& query) const;
 
-    // Updates the title and content of one node. The FTS index is kept in
-    // sync via triggers, so a subsequent search() sees the new text without
-    // any separate rebuild.
-    void update_node_text(long long id, const std::string& title, const std::string& content);
+    // Updates the title and content of one node and bumps last_touched.
+    // The FTS index is kept in sync via triggers, so a subsequent search()
+    // sees the new text without any separate rebuild.
+    void update_node_text(long long id, const std::string& title,
+                          const std::string& content, double last_touched);
+
+    // Updates only the tier field on one node. No FTS impact.
+    void update_node_tier(long long id, const std::string& tier);
 
 private:
     void exec(const char* sql);

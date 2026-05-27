@@ -17,12 +17,15 @@ namespace {
 // the triggers (e.g. DBs created before this code path existed).
 constexpr const char* kSchema = R"SQL(
 CREATE TABLE IF NOT EXISTS nodes (
-    id      INTEGER PRIMARY KEY,
-    x       REAL    NOT NULL,
-    y       REAL    NOT NULL,
-    z       REAL    NOT NULL,
-    title   TEXT    NOT NULL DEFAULT '',
-    content TEXT    NOT NULL DEFAULT ''
+    id           INTEGER PRIMARY KEY,
+    x            REAL    NOT NULL,
+    y            REAL    NOT NULL,
+    z            REAL    NOT NULL,
+    title        TEXT    NOT NULL DEFAULT '',
+    content      TEXT    NOT NULL DEFAULT '',
+    first_seen   REAL    NOT NULL DEFAULT 0.0,
+    last_touched REAL    NOT NULL DEFAULT 0.0,
+    tier         TEXT    NOT NULL DEFAULT 'confirmed'
 );
 CREATE TABLE IF NOT EXISTS edges (
     source INTEGER NOT NULL,
@@ -85,6 +88,25 @@ Database::Database(const std::string& path) : db_(nullptr) {
         throw std::runtime_error(msg);
     }
     exec(kSchema);
+
+    // Schema migration for DBs created by earlier versions that lacked
+    // first_seen/last_touched/tier. Detect via pragma_table_info and ALTER
+    // ADD COLUMN if missing. SQLite's CREATE TABLE IF NOT EXISTS doesn't
+    // alter an existing table to match a new schema; we have to do it.
+    auto column_exists = [this](const char* col) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT 1 FROM pragma_table_info('nodes') WHERE name = ?;",
+                -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, col, -1, SQLITE_TRANSIENT);
+        const bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+        return found;
+    };
+    if (!column_exists("first_seen"))   exec("ALTER TABLE nodes ADD COLUMN first_seen REAL NOT NULL DEFAULT 0.0;");
+    if (!column_exists("last_touched")) exec("ALTER TABLE nodes ADD COLUMN last_touched REAL NOT NULL DEFAULT 0.0;");
+    if (!column_exists("tier"))         exec("ALTER TABLE nodes ADD COLUMN tier TEXT NOT NULL DEFAULT 'confirmed';");
+
     // Catch up the FTS index against the current nodes table. No-op if the
     // triggers have been keeping it consistent; mandatory after a schema
     // upgrade from a pre-FTS5 build.
@@ -112,17 +134,22 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
 
         sqlite3_stmt* ins_node = nullptr;
         if (sqlite3_prepare_v2(db_,
-                "INSERT INTO nodes (id, x, y, z, title, content) VALUES (?,?,?,?,?,?);",
+                "INSERT INTO nodes (id, x, y, z, title, content, "
+                "first_seen, last_touched, tier) "
+                "VALUES (?,?,?,?,?,?,?,?,?);",
                 -1, &ins_node, nullptr) != SQLITE_OK) {
             throw_sqlite(db_, "prepare INSERT nodes");
         }
         for (const StoredNode& n : nodes) {
-            sqlite3_bind_int64(ins_node, 1, n.id);
+            sqlite3_bind_int64 (ins_node, 1, n.id);
             sqlite3_bind_double(ins_node, 2, n.position.x);
             sqlite3_bind_double(ins_node, 3, n.position.y);
             sqlite3_bind_double(ins_node, 4, n.position.z);
-            sqlite3_bind_text(ins_node, 5, n.title.c_str(),   -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(ins_node, 6, n.content.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text  (ins_node, 5, n.title.c_str(),   -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text  (ins_node, 6, n.content.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_double(ins_node, 7, n.first_seen);
+            sqlite3_bind_double(ins_node, 8, n.last_touched);
+            sqlite3_bind_text  (ins_node, 9, n.tier.c_str(),    -1, SQLITE_TRANSIENT);
             if (sqlite3_step(ins_node) != SQLITE_DONE) {
                 sqlite3_finalize(ins_node);
                 throw_sqlite(db_, "step INSERT nodes");
@@ -167,18 +194,23 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
 
     sqlite3_stmt* q_nodes = nullptr;
     if (sqlite3_prepare_v2(db_,
-            "SELECT id, x, y, z, title, content FROM nodes ORDER BY id;",
+            "SELECT id, x, y, z, title, content, "
+            "first_seen, last_touched, tier "
+            "FROM nodes ORDER BY id;",
             -1, &q_nodes, nullptr) != SQLITE_OK) {
         throw_sqlite(db_, "prepare SELECT nodes");
     }
     while (sqlite3_step(q_nodes) == SQLITE_ROW) {
         StoredNode n{};
-        n.id         = sqlite3_column_int64(q_nodes, 0);
-        n.position.x = static_cast<float>(sqlite3_column_double(q_nodes, 1));
-        n.position.y = static_cast<float>(sqlite3_column_double(q_nodes, 2));
-        n.position.z = static_cast<float>(sqlite3_column_double(q_nodes, 3));
+        n.id           = sqlite3_column_int64(q_nodes, 0);
+        n.position.x   = static_cast<float>(sqlite3_column_double(q_nodes, 1));
+        n.position.y   = static_cast<float>(sqlite3_column_double(q_nodes, 2));
+        n.position.z   = static_cast<float>(sqlite3_column_double(q_nodes, 3));
         if (const unsigned char* t = sqlite3_column_text(q_nodes, 4)) n.title   = reinterpret_cast<const char*>(t);
         if (const unsigned char* c = sqlite3_column_text(q_nodes, 5)) n.content = reinterpret_cast<const char*>(c);
+        n.first_seen   = sqlite3_column_double(q_nodes, 6);
+        n.last_touched = sqlite3_column_double(q_nodes, 7);
+        if (const unsigned char* tr = sqlite3_column_text(q_nodes, 8)) n.tier = reinterpret_cast<const char*>(tr);
         nodes.push_back(std::move(n));
     }
     sqlite3_finalize(q_nodes);
@@ -200,19 +232,37 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     return !nodes.empty();
 }
 
-void Database::update_node_text(long long id, const std::string& title, const std::string& content) {
+void Database::update_node_text(long long id, const std::string& title,
+                                const std::string& content, double last_touched) {
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_,
-            "UPDATE nodes SET title = ?, content = ? WHERE id = ?;",
+            "UPDATE nodes SET title = ?, content = ?, last_touched = ? WHERE id = ?;",
             -1, &stmt, nullptr) != SQLITE_OK) {
         throw_sqlite(db_, "prepare UPDATE nodes");
     }
-    sqlite3_bind_text (stmt, 1, title.c_str(),   -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, content.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 3, id);
+    sqlite3_bind_text  (stmt, 1, title.c_str(),   -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text  (stmt, 2, content.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 3, last_touched);
+    sqlite3_bind_int64 (stmt, 4, id);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         throw_sqlite(db_, "step UPDATE nodes");
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::update_node_tier(long long id, const std::string& tier) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "UPDATE nodes SET tier = ? WHERE id = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare UPDATE nodes (tier)");
+    }
+    sqlite3_bind_text (stmt, 1, tier.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, id);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step UPDATE nodes (tier)");
     }
     sqlite3_finalize(stmt);
 }

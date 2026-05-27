@@ -3,6 +3,8 @@
 
 #include "persistence/db.h"
 
+#include <sqlite3.h>
+
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -200,7 +202,7 @@ TEST_CASE("db: update_node_text updates the row and keeps FTS in sync") {
     REQUIRE(db.search("old").size() == 1);
     REQUIRE(db.search("new").empty());
 
-    db.update_node_text(1, "new title", "fresh content");
+    db.update_node_text(1, "new title", "fresh content", 0.0);
 
     CHECK(db.search("old").empty());
     REQUIRE(db.search("new").size() == 1);
@@ -256,7 +258,7 @@ TEST_CASE("db: update_node_text on a non-existent id is a silent no-op") {
     db.save_graph({{1, {0,0,0}, "real", ""}}, {});
 
     // Should not throw.
-    db.update_node_text(9999, "ghost", "no row to update");
+    db.update_node_text(9999, "ghost", "no row to update", 0.0);
 
     std::vector<StoredNode> nodes;
     std::vector<Edge>       edges;
@@ -272,7 +274,7 @@ TEST_CASE("db: update_node_text preserves the row's position fields") {
     Database db(":memory:");
     db.save_graph({{1, {1.5f, -2.5f, 7.0f}, "before", "body"}}, {});
 
-    db.update_node_text(1, "after", "new body");
+    db.update_node_text(1, "after", "new body", 0.0);
 
     std::vector<StoredNode> nodes;
     std::vector<Edge>       edges;
@@ -319,13 +321,184 @@ TEST_CASE("db: an 8 KB content blob roundtrips exactly") {
     CHECK(nodes[0].content.size() == 8192);
 }
 
+TEST_CASE("db: first_seen / last_touched / tier roundtrip through save_graph") {
+    Database db(":memory:");
+    StoredNode in{};
+    in.id           = 7;
+    in.position     = {1, 2, 3};
+    in.title        = "node-with-tier";
+    in.content      = "body";
+    in.first_seen   = 1234567890.5;
+    in.last_touched = 1234567899.25;
+    in.tier         = "suspected";
+    db.save_graph({in}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].first_seen   == doctest::Approx(1234567890.5));
+    CHECK(out[0].last_touched == doctest::Approx(1234567899.25));
+    CHECK(out[0].tier         == "suspected");
+}
+
+TEST_CASE("db: update_node_text bumps last_touched") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1;
+    n.position = {0, 0, 0};
+    n.title = "old";
+    n.last_touched = 1.0;
+    db.save_graph({n}, {});
+
+    db.update_node_text(1, "new", "body", 999.5);
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].title == "new");
+    CHECK(out[0].last_touched == doctest::Approx(999.5));
+}
+
+TEST_CASE("db: update_node_tier changes only the tier") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 1;
+    n.position = {1, 2, 3};
+    n.title = "stable";
+    n.content = "body";
+    n.first_seen = 100.0;
+    n.last_touched = 200.0;
+    n.tier = "confirmed";
+    db.save_graph({n}, {});
+
+    db.update_node_tier(1, "phantom");
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].tier         == "phantom");
+    CHECK(out[0].title        == "stable");
+    CHECK(out[0].content      == "body");
+    CHECK(out[0].first_seen   == doctest::Approx(100.0));
+    CHECK(out[0].last_touched == doctest::Approx(200.0));
+}
+
+TEST_CASE("db: legacy table missing new columns is migrated on open") {
+    const std::string path = "/tmp/zg_migrate_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    // Manually create a pre-migration DB shape using raw SQLite, then open
+    // through Database and verify the ALTER ADD COLUMN path filled in the
+    // new columns transparently.
+    {
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        sqlite3_exec(raw,
+            "CREATE TABLE nodes ("
+            "  id INTEGER PRIMARY KEY, x REAL, y REAL, z REAL,"
+            "  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '');"
+            "CREATE TABLE edges (source INTEGER, target INTEGER, weight REAL);"
+            "INSERT INTO nodes (id, x, y, z, title, content) VALUES (1, 0, 0, 0, 'legacy', 'old');",
+            nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+    }
+
+    Database db(path);
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].title        == "legacy");
+    CHECK(out[0].first_seen   == doctest::Approx(0.0));
+    CHECK(out[0].last_touched == doctest::Approx(0.0));
+    CHECK(out[0].tier         == "confirmed");
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("db: update_node_tier on a non-existent id is a silent no-op") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+    db.update_node_tier(9999, "phantom");  // should not throw
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].id == 1);
+    CHECK(out[0].tier == "confirmed");
+}
+
+TEST_CASE("db: 500-node save/load roundtrip stays correct + reasonably fast") {
+    Database db(":memory:");
+    std::vector<StoredNode> in;
+    in.reserve(500);
+    for (long long i = 0; i < 500; ++i) {
+        StoredNode n{};
+        n.id           = i;
+        n.position     = {static_cast<float>(i), 0, 0};
+        n.title        = "node-" + std::to_string(i);
+        n.first_seen   = 1000.0 + static_cast<double>(i);
+        n.last_touched = 2000.0 + static_cast<double>(i);
+        n.tier         = (i % 3 == 0) ? "confirmed" : (i % 3 == 1 ? "suspected" : "phantom");
+        in.push_back(std::move(n));
+    }
+    db.save_graph(in, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 500);
+    CHECK(out[0].title   == "node-0");
+    CHECK(out[499].title == "node-499");
+    CHECK(out[42].tier   == "confirmed");
+    CHECK(out[42].first_seen == doctest::Approx(1042.0));
+}
+
+TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+
+    db.update_node_tier(1, "");
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].tier.empty());
+}
+
+TEST_CASE("db: 4KB title roundtrips byte-exact") {
+    Database db(":memory:");
+    std::string long_title(4096, 'A');
+    db.save_graph({{1, {0,0,0}, long_title, ""}}, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    CHECK(out[0].title.size() == 4096);
+    CHECK(out[0].title == long_title);
+}
+
+TEST_CASE("db: search query containing punctuation sanitizes safely") {
+    // The parser strips anything non-alphanumeric, so "it's" becomes "it s"
+    // → "it* s*". A naive concatenation into the FTS5 query string without
+    // sanitization would explode on the apostrophe.
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "it's complicated", ""}}, {});
+
+    CHECK(db.search("it's").size() == 1);
+    CHECK(db.search("complicated").size() == 1);
+    CHECK(db.search("'; DROP TABLE nodes; --").empty());
+}
+
 TEST_CASE("db: repeated update_node_text final-write-wins") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "v1", ""}}, {});
 
-    db.update_node_text(1, "v2", "");
-    db.update_node_text(1, "v3", "");
-    db.update_node_text(1, "final", "settled body");
+    db.update_node_text(1, "v2", "", 0.0);
+    db.update_node_text(1, "v3", "", 0.0);
+    db.update_node_text(1, "final", "settled body", 0.0);
 
     std::vector<StoredNode> nodes;
     std::vector<Edge>       edges;
@@ -340,7 +513,7 @@ TEST_CASE("db: repeated update_node_text final-write-wins") {
 TEST_CASE("db: in-place edits survive a subsequent save_graph that preserves the row") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "before", ""}}, {});
-    db.update_node_text(1, "after", "edited");
+    db.update_node_text(1, "after", "edited", 0.0);
 
     // Simulate the main loop's save-on-shutdown path: re-save the entire
     // graph with the StoredNode struct carrying the edited fields.
@@ -360,7 +533,7 @@ TEST_CASE("db: update_node_text with empty title clears the previous FTS hit") {
     db.save_graph({{1, {0,0,0}, "previously-titled", ""}}, {});
     REQUIRE(db.search("previously").size() == 1);
 
-    db.update_node_text(1, "", "");
+    db.update_node_text(1, "", "", 0.0);
     CHECK(db.search("previously").empty());
 
     std::vector<StoredNode> nodes;

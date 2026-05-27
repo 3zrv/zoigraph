@@ -137,6 +137,22 @@ TEST_CASE("integrator: velocity clamp caps speed even under extreme repulsion") 
     }
 }
 
+TEST_CASE("integrator: phantom_repulsion_k = 0 disables phantom shoves") {
+    // Even with phantoms present, a zero coefficient turns them into no-ops.
+    SimParams params = zero_forces();
+    params.phantom_repulsion_k = 0.0f;
+
+    std::vector<Vector3> positions  = {{0, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}};
+    const std::vector<Vector3> phantoms = {{1.0f, 0, 0}, {0, 1.0f, 0}};
+
+    for (int i = 0; i < 30; ++i) {
+        integrate_step(positions, velocities, {}, params, phantoms);
+    }
+    CHECK(positions[0].x == doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(positions[0].y == doctest::Approx(0.0f).epsilon(1e-5));
+}
+
 TEST_CASE("integrator: a phantom shoves a nearby static node away") {
     // Per directive §5.B, phantoms apply one-way Coulomb repulsion with a
     // much larger coefficient than static-vs-static. A static node placed
@@ -337,6 +353,24 @@ TEST_CASE("PhysicsThread: start and stop are idempotent") {
     physics.stop();
 }
 
+TEST_CASE("PhysicsThread: hundred enqueue_node calls in a burst all land") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    for (int i = 0; i < 100; ++i) {
+        physics.enqueue_node({static_cast<float>(i), 0.0f, 0.0f});
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(positions.size() == 101);
+}
+
 TEST_CASE("PhysicsThread: enqueue_node before start() is picked up at first tick") {
     GraphBuffer buffer;
     PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
@@ -396,6 +430,140 @@ TEST_CASE("PhysicsThread: enqueue_node is drained on the next tick") {
     CHECK(std::fabs(positions[1].x - 5.0f) < 2.0f);
     CHECK(std::fabs(positions[1].y - 5.0f) < 2.0f);
     CHECK(std::fabs(positions[1].z - 5.0f) < 2.0f);
+}
+
+TEST_CASE("integrator: out-of-bounds edges are silently skipped (no crash)") {
+    // A DB loaded with orphan edges (target references a node that was
+    // never re-saved) should not crash the integrator; the bad edge is
+    // dropped and the rest of the simulation proceeds.
+    std::vector<Vector3> positions  = {{0, 0, 0}, {2, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}, {0, 0, 0}};
+    SimParams params = zero_forces();
+    params.spring_k = 0.5f;
+    params.spring_rest = 2.0f;
+    const std::vector<Edge> edges = {
+        {0, 1},          // valid
+        {0, 999},        // orphan: out of bounds
+        {500, 1000},     // both out of bounds
+        {1, 0},          // valid
+    };
+
+    integrate_step(positions, velocities, edges, params);
+    integrate_step(positions, velocities, edges, params);
+
+    // No out-of-bounds read happened; positions remain finite.
+    for (const auto& p : positions) {
+        CHECK_FALSE(std::isnan(p.x));
+        CHECK_FALSE(std::isnan(p.y));
+        CHECK_FALSE(std::isnan(p.z));
+    }
+}
+
+TEST_CASE("PhysicsThread: enqueue_edge before start() lands on the first tick") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.enqueue_edge({0, 1});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 0);
+    CHECK(edges[0].target == 1);
+}
+
+TEST_CASE("PhysicsThread: set_use_barnes_hut toggles cleanly at runtime") {
+    GraphBuffer buffer;
+    // Start with BH off.
+    SimParams p{};
+    p.use_barnes_hut = false;
+    PhysicsThread physics({{0, 0, 0}, {1, 0, 0}, {-1, 0, 0}}, {}, buffer, nullptr, p);
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    CHECK_FALSE(physics.use_barnes_hut());
+    physics.set_use_barnes_hut(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(physics.use_barnes_hut());
+
+    physics.set_use_barnes_hut(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(physics.use_barnes_hut());
+
+    // The simulation is still alive after multiple toggles.
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+    REQUIRE(positions.size() == 3);
+}
+
+TEST_CASE("PhysicsThread: enqueue_edge appears in the buffer's edge snapshot") {
+    // After enqueue_edge drains on the next tick, the physics thread
+    // republishes edges_ to the buffer so the render-side snapshot picks
+    // them up without main needing to manually set_edges.
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_edge({0, 1});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 0);
+    CHECK(edges[0].target == 1);
+}
+
+TEST_CASE("PhysicsThread: many enqueue_edge calls all land via the buffer") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {3, 0, 0}},
+                          {}, buffer, nullptr);
+    physics.start();
+    physics.enqueue_edge({0, 1});
+    physics.enqueue_edge({1, 2});
+    physics.enqueue_edge({2, 3});
+    physics.enqueue_edge({0, 3});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(edges.size() == 4);
+}
+
+TEST_CASE("PhysicsThread: enqueue_node + enqueue_edge in one click batch") {
+    // Mirrors the click-to-pin flow: a new node and several edges referencing
+    // its index get pushed at the same time. Both must land together so the
+    // edges' source index resolves to a real position by the next tick.
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_node({10, 0, 0});
+    physics.enqueue_edge({2, 0});
+    physics.enqueue_edge({2, 1});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(positions.size() == 3);
+    REQUIRE(edges.size() == 2);
+    CHECK(edges[0].source == 2);
+    CHECK(edges[1].source == 2);
 }
 
 TEST_CASE("PhysicsThread: multiple enqueue_node calls all land") {

@@ -14,6 +14,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Opt-in AddressSanitizer build: `cmake -S . -B build -DZG_ASAN=ON`
+# Applies globally so every TU (including FetchContent deps and tests) shares
+# the same ASAN runtime — partial instrumentation breaks linking.
+option(ZG_ASAN "Build zoigraph with AddressSanitizer" OFF)
+if(ZG_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+endif()
+
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
@@ -101,10 +110,15 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- input (pure key/event state machines, testable without raylib) --------
+add_library(zg_input STATIC src/input/escape_wipe.cpp)
+target_include_directories(zg_input PUBLIC src)
+
 # ---- graph (thread-safe buffer between physics and render) -----------------
 add_library(zg_graph STATIC
     src/graph/graph_buffer.cpp
     src/graph/picks.cpp
+    src/graph/wikilinks.cpp
 )
 target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
@@ -144,6 +158,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_physics_thread
     zg_persistence
     zg_telemetry
+    zg_input
     raylib
     rlimgui
     imgui
@@ -154,6 +169,7 @@ target_include_directories(zoigraph PRIVATE src)
 if(NOT WIN32)
     target_link_libraries(zoigraph PRIVATE pthread)
 endif()
+
 
 # ---- tests -----------------------------------------------------------------
 enable_testing()

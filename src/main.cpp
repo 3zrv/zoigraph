@@ -7,14 +7,18 @@
 #include <rlImGui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <ctime>
 #include <random>
 #include <vector>
 
 #include "graph/graph_buffer.h"
 #include "graph/picks.h"
 #include "graph/types.h"
+#include "graph/wikilinks.h"
+#include "input/escape_wipe.h"
 #include "persistence/db.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
@@ -156,6 +160,14 @@ void apply_terminal_theme() {
     c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.00f, 0.00f, 0.80f);
     c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.00f, 0.00f, 0.80f);
     c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
+}
+
+// Wall-clock Unix seconds. Stable across process restarts (unlike raylib's
+// GetTime which resets each launch), so it's what we persist for
+// first_seen / last_touched.
+double unix_now() {
+    using namespace std::chrono;
+    return duration<double>(system_clock::now().time_since_epoch()).count();
 }
 
 constexpr Vector3 kCameraDefaultPos       = {60.0f, 60.0f, 60.0f};
@@ -432,6 +444,9 @@ int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(kWidth, kHeight, "zoigraph");
     SetTargetFPS(144);
+    // Raylib defaults to ESC-to-quit; disable so the triple-escape wipe
+    // gets the keypresses instead.
+    SetExitKey(KEY_NULL);
 
     rlImGuiSetup(true);
     apply_terminal_theme();
@@ -472,11 +487,36 @@ int main() {
         initial_positions.reserve(stored_nodes.size());
         for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
     } else {
-        initial_positions = make_initial_positions(kNodeCount);
-        initial_edges     = make_random_edges(kNodeCount, kEdgeCount);
-        stored_nodes.reserve(initial_positions.size());
-        for (std::size_t i = 0; i < initial_positions.size(); ++i) {
-            stored_nodes.push_back({static_cast<long long>(i), initial_positions[i], "", ""});
+        // Fresh DB: self node at id 0, anchored at origin, distinct tier.
+        // Then kNodeCount random nodes at ids 1..N. Random edges shift up
+        // by one so they reference the random nodes, never self.
+        const double now_ts = unix_now();
+        zg::persistence::StoredNode self_node{};
+        self_node.id           = 0;
+        self_node.position     = {0.0f, 0.0f, 0.0f};
+        self_node.title        = "self";
+        self_node.content      = "the operator";
+        self_node.first_seen   = now_ts;
+        self_node.last_touched = now_ts;
+        self_node.tier         = "self";
+        stored_nodes.push_back(std::move(self_node));
+        initial_positions.push_back({0.0f, 0.0f, 0.0f});
+
+        auto random_positions = make_initial_positions(kNodeCount);
+        for (std::size_t i = 0; i < random_positions.size(); ++i) {
+            initial_positions.push_back(random_positions[i]);
+            zg::persistence::StoredNode n{};
+            n.id           = static_cast<long long>(i + 1);
+            n.position     = random_positions[i];
+            n.first_seen   = now_ts;
+            n.last_touched = now_ts;
+            n.tier         = "confirmed";
+            stored_nodes.push_back(std::move(n));
+        }
+        initial_edges = make_random_edges(kNodeCount, kEdgeCount);
+        for (auto& e : initial_edges) {
+            e.source += 1;
+            e.target += 1;
         }
     }
 
@@ -505,8 +545,21 @@ int main() {
     RabbitHole                       rabbit;
     Bones                            bones;
     std::mt19937                     rabbit_rng(std::random_device{}());
+    zg::input::EscapeWipe            esc_wipe;
+    bool                             requested_exit = false;
+    // Window for the triple-escape wipe. 1.5s is forgiving enough to survive
+    // OS input latency on a relaxed tap-tap-tap; tightening this much under
+    // 1s starts making the gesture feel finicky.
+    constexpr double                 kWipeWindow = 1.5;
 
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && !requested_exit) {
+        // Triple-Escape wipe — three ESC presses within kWipeWindow seconds
+        // triggers a clean shutdown. (When SQLCipher lands this is where
+        // the key buffer gets zeroed before the DB closes.)
+        if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), kWipeWindow)) {
+            requested_exit = true;
+        }
+
         if (IsWindowResized()) {
             UnloadRenderTexture(scene_rt);
             scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
@@ -565,11 +618,35 @@ int main() {
 
             if (phantom_hit >= 0) {
                 // Promote: halt decay, append a Static Node carrying the
-                // phantom's label as title, save to disk, queue it into
-                // physics, and select the new node.
+                // phantom's label as title, materialize any jagged-edge
+                // connections as real graph edges, save to disk, queue
+                // both node and edges into physics, then select. Promoted
+                // node enters the "phantom" tier (visibly distinct from
+                // confirmed Static Nodes).
                 const auto& ph = phantoms[phantom_hit];
                 const long long new_id = static_cast<long long>(stored_nodes.size());
-                stored_nodes.push_back({new_id, ph.position, ph.label, ""});
+                const double promoted_ts = unix_now();
+                zg::persistence::StoredNode promoted{};
+                promoted.id           = new_id;
+                promoted.position     = ph.position;
+                promoted.title        = ph.label;
+                promoted.content      = "";
+                promoted.first_seen   = promoted_ts;
+                promoted.last_touched = promoted_ts;
+                promoted.tier         = "phantom";
+                stored_nodes.push_back(std::move(promoted));
+
+                for (long long target_id : ph.connections) {
+                    if (target_id < 0) continue;
+                    const auto tidx = static_cast<std::size_t>(target_id);
+                    if (tidx >= positions.size()) continue;
+                    if (tidx == static_cast<std::size_t>(new_id)) continue;
+                    const zg::graph::Edge new_edge{
+                        static_cast<std::size_t>(new_id), tidx};
+                    edges.push_back(new_edge);
+                    physics.enqueue_edge(new_edge);
+                }
+
                 phantom_buffer.remove(ph.id);
                 db.save_graph(stored_nodes, edges);
                 physics.enqueue_node(ph.position);
@@ -610,6 +687,21 @@ int main() {
         for (const auto& e : edges) {
             if (e.source < positions.size() && e.target < positions.size()) {
                 DrawLine3D(positions[e.source], positions[e.target], MAROON);
+            }
+        }
+
+        // Tier indicators: every non-confirmed node gets a small wireframe
+        // halo whose color reflects its tier. Confirmed nodes stay bare
+        // (the bulk of the field) so the few tiered ones pop visually.
+        // Self gets a bigger, always-visible green halo.
+        for (std::size_t i = 0; i < positions.size() && i < stored_nodes.size(); ++i) {
+            const auto& tier = stored_nodes[i].tier;
+            if (tier == "self") {
+                DrawSphereWires(positions[i], kNodeRadius * 2.0f, 12, 12, GREEN);
+            } else if (tier == "suspected") {
+                DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, ORANGE);
+            } else if (tier == "phantom") {
+                DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
             }
         }
 
@@ -719,6 +811,49 @@ int main() {
             ImGui::Spacing();
 
             auto& sn = stored_nodes[selected_node];
+
+            // Tier picker: drives halo color in the 3D view and persists
+            // immediately on change (no save-to-disk required).
+            static const char* kTiers[] = {"confirmed", "suspected", "phantom", "self"};
+            int tier_idx = 0;
+            for (int t = 0; t < 4; ++t) {
+                if (sn.tier == kTiers[t]) { tier_idx = t; break; }
+            }
+            if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
+                sn.tier = kTiers[tier_idx];
+                db.update_node_tier(sn.id, sn.tier);
+            }
+
+            // Timestamps — read-only display. 0 means "unknown" (legacy row
+            // from before the schema migration).
+            if (sn.first_seen > 0.0) {
+                const std::time_t t = static_cast<std::time_t>(sn.first_seen);
+                char buf[32];
+                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+                ImGui::Text("first seen   %s", buf);
+            } else {
+                ImGui::TextDisabled("first seen   (unknown)");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("set once when the node is created:\n"
+                                  "  - fresh DB initial node generation\n"
+                                  "  - click-to-pin promotion of a phantom\n"
+                                  "never updated after that.");
+            }
+            if (sn.last_touched > 0.0) {
+                const std::time_t t = static_cast<std::time_t>(sn.last_touched);
+                char buf[32];
+                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+                ImGui::Text("last touched %s", buf);
+            } else {
+                ImGui::TextDisabled("last touched (unknown)");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("bumped whenever the operator edits title or content.\n"
+                                  "tier changes, physics drift, and incoming edges do NOT bump.");
+            }
+            ImGui::Spacing();
+
             bool text_changed = false;
             text_changed |= ImGui::InputText("title", &sn.title);
             ImGui::TextDisabled("content (markdown)");
@@ -728,9 +863,43 @@ int main() {
             if (text_changed) {
                 // Persist the edit immediately so search picks it up on the
                 // next keystroke; triggers keep the FTS index in sync.
-                db.update_node_text(sn.id, sn.title, sn.content);
+                const double now_ts = unix_now();
+                sn.last_touched = now_ts;
+                db.update_node_text(sn.id, sn.title, sn.content, now_ts);
                 // The query may now have new hits.
                 search_hits = db.search(search_query);
+
+                // Wikilinks: parse [[title]] occurrences out of the content
+                // and materialize them as edges from this node to whichever
+                // existing node has a matching title. Skip duplicates so
+                // re-saving doesn't fan out parallel edges. Edge persists
+                // via the explicit save button or shutdown save.
+                const auto refs = zg::graph::extract_wikilinks(sn.content);
+                for (const std::string& title : refs) {
+                    if (title.empty()) continue;
+                    std::size_t target_idx = SIZE_MAX;
+                    for (std::size_t k = 0; k < stored_nodes.size(); ++k) {
+                        if (stored_nodes[k].title == title) {
+                            target_idx = k;
+                            break;
+                        }
+                    }
+                    if (target_idx == SIZE_MAX) continue;
+                    if (target_idx == static_cast<std::size_t>(selected_node)) continue;
+                    const std::size_t src_idx = static_cast<std::size_t>(selected_node);
+                    bool exists = false;
+                    for (const auto& e : edges) {
+                        if ((e.source == src_idx && e.target == target_idx) ||
+                            (e.source == target_idx && e.target == src_idx)) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (exists) continue;
+                    const zg::graph::Edge link_edge{src_idx, target_idx};
+                    edges.push_back(link_edge);
+                    physics.enqueue_edge(link_edge);
+                }
             }
 
             if (ImGui::Button("save to disk")) {
@@ -761,6 +930,7 @@ int main() {
         ImGui::TextDisabled("R KEY              reset view");
         ImGui::TextDisabled("H KEY              rabbit hole");
         ImGui::TextDisabled("B KEY              throw the bones");
+        ImGui::TextDisabled("ESC x 3            wipe + exit");
         ImGui::End();
 
         // Bones scratch panel — separate ImGui window, opens when a throw
@@ -798,6 +968,16 @@ int main() {
         }
 
         rlImGuiEnd();
+
+        // Triple-escape wipe progress indicator — drawn last so it sits on
+        // top of everything (ImGui included). Big and red so the operator
+        // sees instantly whether their keypresses are landing.
+        const int esc_recent = esc_wipe.count_recent(GetTime(), kWipeWindow);
+        if (esc_recent > 0 && esc_recent < 3) {
+            const char* msg = TextFormat("ESC %d/3", esc_recent);
+            const int   tw  = MeasureText(msg, 36);
+            DrawText(msg, GetScreenWidth() - tw - 24, 24, 36, RED);
+        }
 
         EndDrawing();
     }
