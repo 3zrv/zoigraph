@@ -52,6 +52,16 @@ void PhysicsThread::enqueue_edge(graph::Edge edge) {
     pending_edges_.push_back(edge);
 }
 
+void PhysicsThread::set_pin(std::size_t idx, Vector3 anchor) {
+    std::lock_guard<std::mutex> lock(pins_mu_);
+    pins_[idx] = anchor;
+}
+
+void PhysicsThread::clear_pin(std::size_t idx) {
+    std::lock_guard<std::mutex> lock(pins_mu_);
+    pins_.erase(idx);
+}
+
 void PhysicsThread::run() {
     using clock = std::chrono::steady_clock;
     const auto tick = std::chrono::microseconds(1'000'000 / std::max(1, params_.target_hz));
@@ -179,6 +189,19 @@ void PhysicsThread::step() {
     SimParams effective    = params_;
     effective.use_barnes_hut = use_barnes_hut_.load();
     integrate_step(positions_, velocities_, edges_, effective, phantom_positions);
+
+    // Restore pinned nodes after integration so they appear physics-immune.
+    // Done under pins_mu_ so set_pin / clear_pin from main can update the
+    // anchor concurrently with a tick in progress without tearing.
+    {
+        std::lock_guard<std::mutex> lock(pins_mu_);
+        for (const auto& [idx, anchor] : pins_) {
+            if (idx < positions_.size()) {
+                positions_[idx]  = anchor;
+                velocities_[idx] = {0.0f, 0.0f, 0.0f};
+            }
+        }
+    }
 }
 
 }  // namespace zg::physics

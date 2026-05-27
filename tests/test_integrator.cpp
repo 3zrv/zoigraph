@@ -544,6 +544,67 @@ TEST_CASE("PhysicsThread: set_use_barnes_hut toggles cleanly at runtime") {
     REQUIRE(positions.size() == 3);
 }
 
+TEST_CASE("PhysicsThread: set_pin freezes a node at its anchor across many ticks") {
+    // Two nodes near each other with strong repulsion. The pinned one
+    // should not move; the other should be shoved away.
+    GraphBuffer buffer;
+    SimParams p{};
+    p.repulsion_k = 100.0f;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}}, {}, buffer, nullptr, p);
+    physics.set_pin(0, {0.0f, 0.0f, 0.0f});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    // Pinned node sits at the anchor.
+    CHECK(positions[0].x == doctest::Approx(0.0f).epsilon(0.001f));
+    CHECK(positions[0].y == doctest::Approx(0.0f).epsilon(0.001f));
+    CHECK(positions[0].z == doctest::Approx(0.0f).epsilon(0.001f));
+    // Other node was shoved away.
+    CHECK(std::fabs(positions[1].x) > 0.5f);
+}
+
+TEST_CASE("PhysicsThread: clear_pin lets a previously-pinned node move again") {
+    GraphBuffer buffer;
+    SimParams p{};
+    p.repulsion_k = 100.0f;
+    PhysicsThread physics({{0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}}, {}, buffer, nullptr, p);
+    physics.set_pin(0, {0.0f, 0.0f, 0.0f});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    physics.clear_pin(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+
+    REQUIRE(positions.size() == 2);
+    // After clearing the pin, the formerly-pinned node has had time to
+    // drift under continued repulsion from the other.
+    CHECK(std::fabs(positions[0].x) > 1e-3f);
+}
+
+TEST_CASE("PhysicsThread: set_pin with out-of-bounds index is a silent no-op") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}}, {}, buffer, nullptr);
+    physics.set_pin(999, {7.0f, 7.0f, 7.0f});  // node doesn't exist
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions);
+    physics.stop();
+    REQUIRE(positions.size() == 1);  // no crash, no spurious additions
+}
+
 TEST_CASE("PhysicsThread: enqueue_edge appears in the buffer's edge snapshot") {
     // After enqueue_edge drains on the next tick, the physics thread
     // republishes edges_ to the buffer so the render-side snapshot picks

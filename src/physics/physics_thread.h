@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "graph/graph_buffer.h"
@@ -70,6 +71,16 @@ public:
     // become permanent springs in the graph. Thread-safe.
     void enqueue_edge(graph::Edge edge);
 
+    // Pins a node at `anchor`: after each integration step the node's
+    // position is restored to the anchor and its velocity zeroed.  Used
+    // for the `self` node ("the operator") so the rest of the graph
+    // arranges itself relative to a fixed center. Thread-safe.
+    void set_pin(std::size_t idx, Vector3 anchor);
+
+    // Removes the pin on a node. Subsequent ticks let physics move it
+    // again. No-op if the node wasn't pinned. Thread-safe.
+    void clear_pin(std::size_t idx);
+
     // Toggle Barnes-Hut at runtime. Cheap, lock-free, takes effect on the
     // next tick. False switches back to the naive O(N^2) Coulomb loop.
     void set_use_barnes_hut(bool use) { use_barnes_hut_.store(use); }
@@ -92,6 +103,12 @@ private:
     std::mutex                 pending_mu_;
     std::vector<Vector3>       pending_additions_;
     std::vector<graph::Edge>   pending_edges_;
+
+    // Pinned nodes — index -> anchor position. Re-applied after every
+    // integrate_step under pins_mu_ separately so a pin update isn't
+    // serialized behind the pending-additions drain.
+    mutable std::mutex                                  pins_mu_;
+    std::unordered_map<std::size_t, Vector3>            pins_;
 };
 
 }  // namespace zg::physics

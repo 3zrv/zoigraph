@@ -479,6 +479,7 @@ int main() {
     std::vector<Matrix>          transforms;
     std::vector<std::size_t>     cluster_ids;
     std::string                  tag_filter;
+    std::size_t                  self_idx = SIZE_MAX;  // tier=="self" lookup, SIZE_MAX if absent
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
@@ -542,12 +543,30 @@ int main() {
         // physics. From here on these belong to main.
         positions = initial_positions;
         edges     = initial_edges;
+
+        // Find the self node (tier == "self") so touch-edges and the
+        // self-pin both have a stable anchor. Falls back to SIZE_MAX if
+        // the project doesn't have one (legacy DBs or operator-deleted).
+        self_idx = SIZE_MAX;
+        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+            if (stored_nodes[i].tier == "self") {
+                self_idx = i;
+                break;
+            }
+        }
+
         physics = std::make_unique<zg::physics::PhysicsThread>(
             std::move(initial_positions),
             initial_edges,
             buffer,
             &phantom_buffer);
         physics->start();
+
+        // Pin the self node at its current position so the rest of the
+        // graph arranges itself relative to a fixed center.
+        if (self_idx < positions.size()) {
+            physics->set_pin(self_idx, positions[self_idx]);
+        }
     };
 
     // Ensure there's at least one project. If projects/ is empty, "default"
@@ -1095,6 +1114,29 @@ int main() {
                 // The query may now have new hits.
                 search_hits = db->search(search_query);
 
+                // Touch-edge: any operator edit on a non-self node should
+                // create a record-of-attention from self -> that node.
+                // certainty="hearsay" so the line renders dim and doesn't
+                // visually compete with confirmed edges.
+                if (self_idx < stored_nodes.size() &&
+                    self_idx != static_cast<std::size_t>(selected_node)) {
+                    const std::size_t sel = static_cast<std::size_t>(selected_node);
+                    bool already = false;
+                    for (const auto& e : edges) {
+                        if ((e.source == self_idx && e.target == sel) ||
+                            (e.source == sel && e.target == self_idx)) {
+                            already = true;
+                            break;
+                        }
+                    }
+                    if (!already) {
+                        const zg::graph::Edge touch{
+                            self_idx, sel, "touched", "saw-at", "hearsay"};
+                        edges.push_back(touch);
+                        physics->enqueue_edge(touch);
+                    }
+                }
+
                 // Wikilinks: parse [[title]] occurrences out of the content
                 // and materialize them as edges from this node to whichever
                 // existing node has a matching title. Skip duplicates so
@@ -1328,6 +1370,84 @@ int main() {
             }
             if (!tb_phantom_msg.empty()) {
                 ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
+            }
+
+            ImGui::Separator();
+
+            // Journal-as-nodes — timestamped first-class node with tag
+            // "journal". Auto-edged from self (kind 'wrote') and also from
+            // the currently-selected node if any (kind 'concerns') so the
+            // entry threads itself into whatever the operator was looking
+            // at when they wrote it. Memex trails by accident.
+            static std::string tb_journal_text;
+            static std::string tb_journal_msg;
+            ImGui::TextDisabled("journal entry");
+            ImGui::InputTextMultiline("##tb_journal", &tb_journal_text,
+                                      ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4));
+            if (ImGui::IsItemEdited()) tb_journal_msg.clear();
+            if (ImGui::Button("save journal")) {
+                if (tb_journal_text.empty()) {
+                    tb_journal_msg = "entry is empty";
+                } else if (!physics || !db) {
+                    tb_journal_msg = "no active project";
+                } else {
+                    const double now_ts = unix_now();
+                    const std::time_t tt = static_cast<std::time_t>(now_ts);
+                    char tbuf[32];
+                    std::strftime(tbuf, sizeof(tbuf), "journal-%Y%m%d-%H%M%S",
+                                  std::localtime(&tt));
+                    const long long new_id = static_cast<long long>(stored_nodes.size());
+                    // Position near self so journal entries cluster around
+                    // the operator; small angular offset by id keeps them
+                    // from overlapping each other.
+                    const float ang = 0.5f * static_cast<float>(new_id);
+                    Vector3 anchor{0.0f, 0.0f, 0.0f};
+                    if (self_idx < positions.size()) anchor = positions[self_idx];
+                    const Vector3 spawn{
+                        anchor.x + 3.0f * std::cos(ang),
+                        anchor.y + 1.0f + 0.3f * static_cast<float>(new_id % 5),
+                        anchor.z + 3.0f * std::sin(ang),
+                    };
+                    zg::persistence::StoredNode jn{};
+                    jn.id           = new_id;
+                    jn.position     = spawn;
+                    jn.title        = tbuf;
+                    jn.content      = tb_journal_text;
+                    jn.first_seen   = now_ts;
+                    jn.last_touched = now_ts;
+                    jn.tier         = "confirmed";
+                    jn.tags         = {"journal"};
+                    stored_nodes.push_back(std::move(jn));
+                    physics->enqueue_node(spawn);
+
+                    // self -> journal edge (kind "wrote")
+                    if (self_idx < stored_nodes.size()) {
+                        const zg::graph::Edge e_self{
+                            self_idx, static_cast<std::size_t>(new_id),
+                            "wrote", "knows", "confirmed"};
+                        edges.push_back(e_self);
+                        physics->enqueue_edge(e_self);
+                    }
+                    // journal -> selected edge (kind "concerns") if a node
+                    // is currently selected and isn't the journal itself.
+                    if (selected_node >= 0 &&
+                        static_cast<std::size_t>(selected_node) < stored_nodes.size() &&
+                        static_cast<std::size_t>(selected_node) != static_cast<std::size_t>(new_id)) {
+                        const zg::graph::Edge e_about{
+                            static_cast<std::size_t>(new_id),
+                            static_cast<std::size_t>(selected_node),
+                            "concerns", "saw-at", "confirmed"};
+                        edges.push_back(e_about);
+                        physics->enqueue_edge(e_about);
+                    }
+
+                    db->save_graph(stored_nodes, edges);
+                    tb_journal_msg = "saved " + std::string(tbuf);
+                    tb_journal_text.clear();
+                }
+            }
+            if (!tb_journal_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_journal_msg.c_str());
             }
 
             ImGui::EndTabItem();
