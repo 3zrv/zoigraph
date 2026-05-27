@@ -111,7 +111,10 @@ target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
 # ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
-add_library(zg_macros STATIC src/macros/rabbit_hole.cpp)
+add_library(zg_macros STATIC
+    src/macros/rabbit_hole.cpp
+    src/macros/bones.cpp
+)
 target_include_directories(zg_macros PUBLIC src)
 target_link_libraries(zg_macros PUBLIC zg_graph raylib)
 

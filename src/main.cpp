@@ -22,6 +22,7 @@
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
+#include "macros/bones.h"
 #include "macros/rabbit_hole.h"
 #include "render/camera.h"
 #include "render/draw.h"
@@ -63,102 +64,10 @@ using zg::render::update_orbit_camera;
 using zg::macros::RabbitHole;
 using zg::macros::pick_rabbit_path;
 using zg::macros::update_rabbit_hole;
-
-// ---- Throw-the-bones macro -------------------------------------------------
-// Picks three weakly-connected nodes, smoothly flies the camera to frame all
-// three, and pops an ImGui scratch panel asking the operator what connects
-// them. Forced pattern recognition.
-struct Bones {
-    bool                     active     = false;
-    bool                     panel_open = false;
-    std::vector<std::size_t> chosen;
-    std::string              scratch;
-    float                    elapsed    = 0.0f;
-    float                    duration   = 1.2f;
-    Vector3                  from_target{};
-    Vector3                  to_target{};
-    Vector3                  from_position{};
-    Vector3                  to_position{};
-};
-
-void throw_bones(Bones& b,
-                 const std::vector<Vector3>& positions,
-                 const std::vector<zg::graph::Edge>& edges,
-                 const Camera3D& camera,
-                 std::mt19937& rng) {
-    b.chosen = zg::graph::pick_weakly_connected_triple(positions.size(), edges, rng);
-    if (b.chosen.size() != 3) {
-        b.active = false;
-        b.panel_open = false;
-        return;
-    }
-
-    Vector3 centroid{0, 0, 0};
-    for (auto i : b.chosen) {
-        centroid.x += positions[i].x;
-        centroid.y += positions[i].y;
-        centroid.z += positions[i].z;
-    }
-    centroid.x /= 3.0f; centroid.y /= 3.0f; centroid.z /= 3.0f;
-
-    float spread = 0.0f;
-    for (std::size_t i = 0; i < b.chosen.size(); ++i) {
-        for (std::size_t j = i + 1; j < b.chosen.size(); ++j) {
-            const Vector3 d = Vector3Subtract(positions[b.chosen[i]], positions[b.chosen[j]]);
-            spread = std::max(spread, Vector3Length(d));
-        }
-    }
-
-    // Camera position: back off from the centroid along the current view
-    // direction at a distance proportional to the spread, so all three fit
-    // comfortably in frame.
-    const Vector3 view_offset   = Vector3Subtract(camera.position, camera.target);
-    const float   current_dist  = std::max(0.01f, Vector3Length(view_offset));
-    const Vector3 dir_n         = Vector3Scale(view_offset, 1.0f / current_dist);
-    const float   target_dist   = std::max(20.0f, spread * 2.5f);
-
-    b.from_target   = camera.target;
-    b.to_target     = centroid;
-    b.from_position = camera.position;
-    b.to_position   = Vector3Add(centroid, Vector3Scale(dir_n, target_dist));
-    b.elapsed       = 0.0f;
-    b.active        = true;
-    b.panel_open    = true;
-    b.scratch.clear();
-}
-
-void update_bones(Bones& b, Camera3D& camera, float dt) {
-    if (!b.active) return;
-    b.elapsed += dt;
-    if (b.elapsed >= b.duration) {
-        camera.target   = b.to_target;
-        camera.position = b.to_position;
-        b.active        = false;
-        return;
-    }
-    const float t = b.elapsed / b.duration;
-    const float s = t * t * (3.0f - 2.0f * t);  // smoothstep
-    camera.target   = Vector3Lerp(b.from_target,   b.to_target,   s);
-    camera.position = Vector3Lerp(b.from_position, b.to_position, s);
-}
-
-// Re-triggers the Bones fly machinery for a single node — used by the
-// clickable rows inside the bones scratch panel. Preserves the current
-// camera offset (zoom + angle) so the view shifts to the node without
-// reframing the whole field.
-void bones_fly_to_node(Bones& b, std::size_t node_idx,
-                       const std::vector<Vector3>& positions,
-                       Camera3D& camera) {
-    if (node_idx >= positions.size()) return;
-    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-    b.from_target   = camera.target;
-    b.to_target     = positions[node_idx];
-    b.from_position = camera.position;
-    b.to_position   = Vector3Add(positions[node_idx], offset);
-    b.elapsed       = 0.0f;
-    b.duration      = 0.6f;  // snappier than the initial throw
-    b.active        = true;
-}
+using zg::macros::Bones;
+using zg::macros::throw_bones;
+using zg::macros::update_bones;
+using zg::macros::bones_fly_to_node;
 
 }  // namespace
 
