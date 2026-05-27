@@ -86,6 +86,33 @@ TEST_CASE("wikilinks: closing ]] right at the end is captured") {
     CHECK(out[0] == "node-x");
 }
 
+TEST_CASE("wikilinks: triple brackets [[[x]]] extract the closest valid pair") {
+    // [[[x]]] is parsed as `[[` opening, then `[x` captured until `]]`
+    // closing — the trailing `]` is left in the content stream. This
+    // matches the existing nesting rule (single brackets inside a link
+    // are kept until the closing `]]`).
+    const auto out = extract_wikilinks("[[[x]]]");
+    REQUIRE(out.size() == 1);
+    CHECK(out[0] == "[x");
+}
+
+TEST_CASE("wikilinks: a link at the very start of content captures correctly") {
+    const auto out = extract_wikilinks("[[alpha]] then text");
+    REQUIRE(out.size() == 1);
+    CHECK(out[0] == "alpha");
+}
+
+TEST_CASE("wikilinks: very large content with mixed links and text scales") {
+    std::string content;
+    for (int i = 0; i < 500; ++i) {
+        content += "paragraph " + std::to_string(i) + " has [[link" + std::to_string(i) + "]] in it. ";
+    }
+    const auto out = extract_wikilinks(content);
+    REQUIRE(out.size() == 500);
+    CHECK(out[0]   == "link0");
+    CHECK(out[499] == "link499");
+}
+
 TEST_CASE("wikilinks: many links in a long content blob") {
     std::string content;
     for (int i = 0; i < 200; ++i) {

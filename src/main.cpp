@@ -20,17 +20,18 @@
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
 #include "persistence/db.h"
+#include "persistence/project_store.h"
+#include "persistence/seed.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
 #include "telemetry/phantom_buffer.h"
 #include "telemetry/telemetry_thread.h"
 
+#include <filesystem>
+#include <memory>
+
 namespace {
 
-constexpr int   kNodeCount      = 500;
-constexpr int   kEdgeCount      = 30;
-constexpr float kInitialSpread  = 20.0f;
-constexpr int   kSeed           = 42;
 constexpr float kNodeRadius     = 0.5f;
 constexpr int   kTelemetryPort  = 7777;
 constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
@@ -112,31 +113,6 @@ void main() {
     finalColor = vec4(col, 1.0) * colDiffuse;
 }
 )GLSL";
-
-std::vector<Vector3> make_initial_positions(int count) {
-    std::mt19937 rng(kSeed);
-    std::uniform_real_distribution<float> dist(-kInitialSpread, kInitialSpread);
-    std::vector<Vector3> out;
-    out.reserve(count);
-    for (int i = 0; i < count; ++i) {
-        out.push_back({dist(rng), dist(rng), dist(rng)});
-    }
-    return out;
-}
-
-std::vector<zg::graph::Edge> make_random_edges(int node_count, int edge_count) {
-    std::mt19937 rng(kSeed ^ 0xBEEF);
-    std::uniform_int_distribution<int> dist(0, node_count - 1);
-    std::vector<zg::graph::Edge> out;
-    out.reserve(edge_count);
-    for (int i = 0; i < edge_count; ++i) {
-        int a = dist(rng);
-        int b = dist(rng);
-        while (b == a) b = dist(rng);
-        out.push_back({static_cast<std::size_t>(a), static_cast<std::size_t>(b)});
-    }
-    return out;
-}
 
 void apply_terminal_theme() {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -475,66 +451,85 @@ int main() {
     const int loc_crt_resolution = GetShaderLocation(crt_shader, "resolution");
     const int loc_crt_time       = GetShaderLocation(crt_shader, "time");
 
-    // Persistence: hydrate the graph from disk if a previous run saved one;
-    // otherwise generate a fresh random layout. Node id == array index for
-    // now — when deletion lands we'll need an id-to-index remap on load.
-    zg::persistence::Database db("zoigraph.db");
-    std::vector<zg::persistence::StoredNode> stored_nodes;
-    std::vector<zg::graph::Edge>             initial_edges;
-    std::vector<Vector3>                     initial_positions;
-
-    if (db.load_graph(stored_nodes, initial_edges)) {
-        initial_positions.reserve(stored_nodes.size());
-        for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-    } else {
-        // Fresh DB: self node at id 0, anchored at origin, distinct tier.
-        // Then kNodeCount random nodes at ids 1..N. Random edges shift up
-        // by one so they reference the random nodes, never self.
-        const double now_ts = unix_now();
-        zg::persistence::StoredNode self_node{};
-        self_node.id           = 0;
-        self_node.position     = {0.0f, 0.0f, 0.0f};
-        self_node.title        = "self";
-        self_node.content      = "the operator";
-        self_node.first_seen   = now_ts;
-        self_node.last_touched = now_ts;
-        self_node.tier         = "self";
-        stored_nodes.push_back(std::move(self_node));
-        initial_positions.push_back({0.0f, 0.0f, 0.0f});
-
-        auto random_positions = make_initial_positions(kNodeCount);
-        for (std::size_t i = 0; i < random_positions.size(); ++i) {
-            initial_positions.push_back(random_positions[i]);
-            zg::persistence::StoredNode n{};
-            n.id           = static_cast<long long>(i + 1);
-            n.position     = random_positions[i];
-            n.first_seen   = now_ts;
-            n.last_touched = now_ts;
-            n.tier         = "confirmed";
-            stored_nodes.push_back(std::move(n));
-        }
-        initial_edges = make_random_edges(kNodeCount, kEdgeCount);
-        for (auto& e : initial_edges) {
-            e.source += 1;
-            e.target += 1;
-        }
-    }
+    // Multi-project model: each project lives in projects/<name>.db. The
+    // legacy single-file zoigraph.db is migrated into projects/default.db
+    // on first run with this code. The last-opened project name is stored
+    // in projects/.last so the next launch resumes there.
+    const std::filesystem::path kProjectsDir = "projects";
+    zg::persistence::migrate_legacy_db("zoigraph.db", kProjectsDir, "default");
 
     zg::graph::GraphBuffer            buffer;
     zg::telemetry::PhantomBuffer      phantom_buffer;
     zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
-    zg::physics::PhysicsThread        physics(
-        std::move(initial_positions),
-        initial_edges,
-        buffer,
-        &phantom_buffer);
-    physics.start();
     telemetry.start();
 
+    std::unique_ptr<zg::persistence::Database>    db;
+    std::unique_ptr<zg::physics::PhysicsThread>   physics;
+    std::vector<zg::persistence::StoredNode>      stored_nodes;
+    std::string                                   current_project;
+
+    // Render-loop workspace — owned by main, NOT refilled from the buffer
+    // each frame. Physics publishes positions; main owns edges. Edge
+    // metadata edits (label / kind / certainty) live here and would be
+    // clobbered if we snapshotted them back from the buffer.
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
-    transforms.reserve(kNodeCount);
+    transforms.reserve(512);
+
+    auto open_project = [&](const std::string& name) {
+        // Save and tear down the current session if there is one.
+        if (physics) {
+            physics->stop();
+            std::vector<Vector3> final_positions;
+            buffer.snapshot(final_positions);
+            for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
+                stored_nodes[i].position = final_positions[i];
+            }
+            if (db) db->save_graph(stored_nodes, edges);
+            physics.reset();
+        }
+        db.reset();
+        phantom_buffer.clear();
+        stored_nodes.clear();
+        edges.clear();
+        positions.clear();
+
+        current_project = name;
+        zg::persistence::write_last_project(kProjectsDir, name);
+        db = std::make_unique<zg::persistence::Database>(
+            zg::persistence::project_path(kProjectsDir, name).string());
+
+        std::vector<zg::graph::Edge> initial_edges;
+        std::vector<Vector3>         initial_positions;
+        if (db->load_graph(stored_nodes, initial_edges)) {
+            initial_positions.reserve(stored_nodes.size());
+            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
+        } else {
+            // Fresh project: minimal seed graph from persistence/seed —
+            // self + alice + bob, no edges. The operator builds outward
+            // from there with the toolbar and click-to-pin.
+            auto seed = zg::persistence::make_initial_graph(unix_now());
+            stored_nodes = std::move(seed.nodes);
+            initial_edges = std::move(seed.edges);
+            initial_positions.reserve(stored_nodes.size());
+            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
+        }
+        // Seed main's render-loop state from what's about to be handed to
+        // physics. From here on these belong to main.
+        positions = initial_positions;
+        edges     = initial_edges;
+        physics = std::make_unique<zg::physics::PhysicsThread>(
+            std::move(initial_positions),
+            initial_edges,
+            buffer,
+            &phantom_buffer);
+        physics->start();
+    };
+
+    // Ensure there's at least one project. If projects/ is empty, "default"
+    // will be auto-created by open_project's fresh-DB branch.
+    open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
 
     int                              selected_node = -1;
     std::string                      search_query;
@@ -596,7 +591,9 @@ int main() {
         } else {
             update_orbit_camera(camera);
         }
-        buffer.snapshot(positions, edges);
+        // Positions-only snapshot — edges are owned by main so the buffer
+        // doesn't clobber operator edits to label / kind / certainty.
+        buffer.snapshot(positions);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Raypick on left-click, but only when ImGui isn't already eating the
@@ -644,12 +641,12 @@ int main() {
                     const zg::graph::Edge new_edge{
                         static_cast<std::size_t>(new_id), tidx};
                     edges.push_back(new_edge);
-                    physics.enqueue_edge(new_edge);
+                    physics->enqueue_edge(new_edge);
                 }
 
                 phantom_buffer.remove(ph.id);
-                db.save_graph(stored_nodes, edges);
-                physics.enqueue_node(ph.position);
+                db->save_graph(stored_nodes, edges);
+                physics->enqueue_node(ph.position);
                 selected_node = static_cast<int>(new_id);
             } else {
                 float best_dist = 0.0f;
@@ -684,10 +681,17 @@ int main() {
                               static_cast<int>(transforms.size()));
         }
 
+        // Edges with alpha keyed to certainty: confirmed/suspected/hearsay/
+        // phantom fade progressively. Empty certainty (legacy edges) is
+        // treated as confirmed.
         for (const auto& e : edges) {
-            if (e.source < positions.size() && e.target < positions.size()) {
-                DrawLine3D(positions[e.source], positions[e.target], MAROON);
-            }
+            if (e.source >= positions.size() || e.target >= positions.size()) continue;
+            unsigned char alpha = 255;
+            if      (e.certainty == "suspected") alpha = 180;
+            else if (e.certainty == "hearsay")   alpha = 100;
+            else if (e.certainty == "phantom")   alpha = 50;
+            const Color line_color{MAROON.r, MAROON.g, MAROON.b, alpha};
+            DrawLine3D(positions[e.source], positions[e.target], line_color);
         }
 
         // Tier indicators: every non-confirmed node gets a small wireframe
@@ -769,12 +773,137 @@ int main() {
             EndShaderMode();
         }
 
+        // Edge labels — drawn AFTER the CRT composite so they stay crisp
+        // and BEFORE ImGui so the inspector can sit on top of them. Skip
+        // labels whose midpoint is behind the camera (GetWorldToScreen
+        // returns nonsense for those).
+        {
+            const Vector3 cam_forward = Vector3Subtract(camera.target, camera.position);
+            for (const auto& e : edges) {
+                if (e.label.empty()) continue;
+                if (e.source >= positions.size() || e.target >= positions.size()) continue;
+                const Vector3 mid     = Vector3Lerp(positions[e.source], positions[e.target], 0.5f);
+                const Vector3 to_mid  = Vector3Subtract(mid, camera.position);
+                if (Vector3DotProduct(to_mid, cam_forward) <= 0.0f) continue;
+                const Vector2 screen = GetWorldToScreen(mid, camera);
+                const int tw = MeasureText(e.label.c_str(), 12);
+                DrawText(e.label.c_str(),
+                         static_cast<int>(screen.x) - tw / 2,
+                         static_cast<int>(screen.y) - 7,
+                         12, GRAY);
+            }
+        }
+
         rlImGuiBegin();
-        ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(360, 600), ImGuiCond_FirstUseEver);
-        ImGui::Begin("// INSPECTOR //");
+
+        // Main control panel — fixed-size, position remembered after the
+        // first frame. Width clamps to fit the screen so on narrow displays
+        // the panel never overflows; ImGui's built-in scrollbar handles
+        // vertical overflow inside the tab content.
+        const float main_w = std::min(380.0f, static_cast<float>(GetScreenWidth())  - 32.0f);
+        const float main_h = std::min(720.0f, static_cast<float>(GetScreenHeight()) - 32.0f);
+        ImGui::SetNextWindowPos (ImVec2(16, 16),       ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(main_w, main_h), ImGuiCond_Always);
+        ImGui::Begin("// ZOIGRAPH //", nullptr, ImGuiWindowFlags_NoResize);
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
+
+        // ---- PROJECT switcher ------------------------------------------
+        ImGui::TextDisabled("// PROJECT //");
+        ImGui::Text("active: %s", current_project.c_str());
+        {
+            const auto names = zg::persistence::list_projects(kProjectsDir);
+            int active_idx = -1;
+            std::vector<const char*> ptrs;
+            ptrs.reserve(names.size());
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                ptrs.push_back(names[i].c_str());
+                if (names[i] == current_project) active_idx = static_cast<int>(i);
+            }
+            if (!ptrs.empty()) {
+                if (ImGui::Combo("switch", &active_idx, ptrs.data(),
+                                 static_cast<int>(ptrs.size())) &&
+                    active_idx >= 0 &&
+                    names[static_cast<std::size_t>(active_idx)] != current_project) {
+                    selected_node = -1;
+                    search_query.clear();
+                    search_hits.clear();
+                    bones.panel_open = false;
+                    rabbit.active = false;
+                    open_project(names[static_cast<std::size_t>(active_idx)]);
+                }
+            }
+
+            static std::string new_name;
+            static std::string create_msg;
+            const bool submitted = ImGui::InputText("new", &new_name,
+                                                    ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) create_msg.clear();
+            ImGui::SameLine();
+            const bool clicked = ImGui::SmallButton("create");
+            if (submitted || clicked) {
+                if (new_name.empty()) {
+                    create_msg = "name is empty";
+                } else if (!zg::persistence::is_valid_project_name(new_name)) {
+                    create_msg = "name must be 1-64 chars: [A-Za-z0-9_-]";
+                } else if (std::filesystem::exists(
+                               zg::persistence::project_path(kProjectsDir, new_name))) {
+                    create_msg = "project already exists";
+                } else {
+                    selected_node = -1;
+                    search_query.clear();
+                    search_hits.clear();
+                    bones.panel_open = false;
+                    rabbit.active = false;
+                    const std::string to_open = new_name;
+                    new_name.clear();
+                    create_msg.clear();
+                    open_project(to_open);
+                }
+            }
+            if (!create_msg.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s", create_msg.c_str());
+            }
+
+            // Delete-current arming. First click sets the arm flag; second
+            // confirms. Disables itself if there's only one project left
+            // (always need at least one to be active).
+            static bool delete_armed = false;
+            const bool only_one = names.size() <= 1;
+            if (only_one) ImGui::BeginDisabled();
+            if (!delete_armed) {
+                if (ImGui::SmallButton("delete current...")) delete_armed = true;
+            } else {
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("yes, delete")) {
+                    const std::string victim = current_project;
+                    std::string fallback;
+                    for (const auto& n : names) {
+                        if (n != victim) { fallback = n; break; }
+                    }
+                    if (!fallback.empty()) {
+                        selected_node = -1;
+                        search_query.clear();
+                        search_hits.clear();
+                        bones.panel_open = false;
+                        rabbit.active = false;
+                        open_project(fallback);
+                        zg::persistence::delete_project(kProjectsDir, victim);
+                    }
+                    delete_armed = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("cancel")) delete_armed = false;
+            }
+            if (only_one) ImGui::EndDisabled();
+        }
+        ImGui::Separator();
+        // ---- /PROJECT --------------------------------------------------
+
+        if (ImGui::BeginTabBar("zg_tabs")) {
+        if (ImGui::BeginTabItem("Inspector")) {
+
         ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
         ImGui::Text("edges    %d", static_cast<int>(edges.size()));
         ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
@@ -787,7 +916,7 @@ int main() {
         // edits/shutdown, so the index reflects the on-disk state — local
         // unsaved edits to title/content won't surface until "save to disk."
         if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
-            search_hits = db.search(search_query);
+            search_hits = db->search(search_query);
             if (!search_hits.empty()) {
                 const auto idx = static_cast<std::size_t>(search_hits.front());
                 if (idx < positions.size()) {
@@ -821,7 +950,7 @@ int main() {
             }
             if (ImGui::Combo("tier", &tier_idx, kTiers, 4)) {
                 sn.tier = kTiers[tier_idx];
-                db.update_node_tier(sn.id, sn.tier);
+                db->update_node_tier(sn.id, sn.tier);
             }
 
             // Timestamps — read-only display. 0 means "unknown" (legacy row
@@ -865,9 +994,9 @@ int main() {
                 // next keystroke; triggers keep the FTS index in sync.
                 const double now_ts = unix_now();
                 sn.last_touched = now_ts;
-                db.update_node_text(sn.id, sn.title, sn.content, now_ts);
+                db->update_node_text(sn.id, sn.title, sn.content, now_ts);
                 // The query may now have new hits.
-                search_hits = db.search(search_query);
+                search_hits = db->search(search_query);
 
                 // Wikilinks: parse [[title]] occurrences out of the content
                 // and materialize them as edges from this node to whichever
@@ -898,7 +1027,7 @@ int main() {
                     if (exists) continue;
                     const zg::graph::Edge link_edge{src_idx, target_idx};
                     edges.push_back(link_edge);
-                    physics.enqueue_edge(link_edge);
+                    physics->enqueue_edge(link_edge);
                 }
             }
 
@@ -907,10 +1036,69 @@ int main() {
                      i < positions.size() && i < stored_nodes.size(); ++i) {
                     stored_nodes[i].position = positions[i];
                 }
-                db.save_graph(stored_nodes, edges);
+                db->save_graph(stored_nodes, edges);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("deselect")) selected_node = -1;
+
+            // Incident edges — list every edge touching the selected node
+            // with editable label / kind / certainty. Updates persist
+            // immediately via update_edge; no save-button needed.
+            ImGui::Spacing();
+            ImGui::Separator();
+            const std::size_t sel = static_cast<std::size_t>(selected_node);
+            int incident_count = 0;
+            for (const auto& e : edges) {
+                if (e.source == sel || e.target == sel) ++incident_count;
+            }
+            ImGui::Text("edges (%d incident)", incident_count);
+
+            // Edge editor — flat layout, no CollapsingHeader.  Each row is
+            // its own ImGui::PushID scope so the label/kind/certainty
+            // widgets get unique IDs per edge.  A persistent edit_counter
+            // ticks every time a change registers; if you edit and the
+            // counter doesn't move, the change isn't being detected.
+            static const char* kKindLabels[]  = {"(none)", "knows", "owns", "saw-at", "shell-of", "suspected"};
+            static const char* kKindValues[]  = {"",       "knows", "owns", "saw-at", "shell-of", "suspected"};
+            static const char* kCertainties[] = {"confirmed", "suspected", "hearsay", "phantom"};
+            static int edge_edit_counter = 0;
+            ImGui::TextDisabled("edge edits registered: %d", edge_edit_counter);
+            ImGui::Spacing();
+
+            for (std::size_t i = 0; i < edges.size(); ++i) {
+                auto& e = edges[i];
+                if (e.source != sel && e.target != sel) continue;
+                const std::size_t other = (e.source == sel) ? e.target : e.source;
+                const char* other_title = (other < stored_nodes.size() && !stored_nodes[other].title.empty())
+                                          ? stored_nodes[other].title.c_str()
+                                          : "(untitled)";
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::Separator();
+                ImGui::Text("-> %zu  %s", other, other_title);
+
+                bool changed = false;
+                if (ImGui::InputText("label", &e.label))    changed = true;
+
+                int kind_idx = 0;
+                for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }
+                if (ImGui::Combo("kind", &kind_idx, kKindLabels, 6)) {
+                    e.kind = kKindValues[kind_idx];
+                    changed = true;
+                }
+
+                int c_idx = 0;
+                for (int k = 0; k < 4; ++k) if (e.certainty == kCertainties[k]) { c_idx = k; break; }
+                if (ImGui::Combo("certainty", &c_idx, kCertainties, 4)) {
+                    e.certainty = kCertainties[c_idx];
+                    changed = true;
+                }
+
+                if (changed) {
+                    ++edge_edit_counter;
+                    db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
+                }
+                ImGui::PopID();
+            }
         } else {
             ImGui::TextDisabled("selected: (none)");
             ImGui::TextDisabled("(left-click a node)");
@@ -918,19 +1106,101 @@ int main() {
         ImGui::Separator();
         ImGui::Checkbox("show grid", &show_grid);
         ImGui::Checkbox("CRT post-process", &post_process);
-        bool bh = physics.use_barnes_hut();
+        bool bh = physics->use_barnes_hut();
         if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
-            physics.set_use_barnes_hut(bh);
+            physics->set_use_barnes_hut(bh);
         }
         ImGui::Separator();
-        ImGui::TextDisabled("LEFT-CLICK         select node");
-        ImGui::TextDisabled("RIGHT-DRAG         orbit");
-        ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
-        ImGui::TextDisabled("SCROLL WHEEL       zoom");
-        ImGui::TextDisabled("R KEY              reset view");
-        ImGui::TextDisabled("H KEY              rabbit hole");
-        ImGui::TextDisabled("B KEY              throw the bones");
-        ImGui::TextDisabled("ESC x 3            wipe + exit");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Toolbar")) {
+            // Toolbar tab — manual node creation and local phantom injection.
+            // Same data paths used by click-to-pin and the UDP listener, so
+            // operators get a quick way to grow the graph without leaving
+            // the keyboard or running an external tool.
+
+            static std::string tb_node_title;
+            static std::string tb_node_msg;
+            static int         tb_node_tier_idx = 0;
+            static const char* kToolbarTiers[] = {"confirmed", "suspected", "phantom"};
+
+            ImGui::TextDisabled("create static node");
+            const bool node_submitted = ImGui::InputText("title##tb_node", &tb_node_title,
+                                                         ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) tb_node_msg.clear();
+            ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
+            if (ImGui::Button("create node") || node_submitted) {
+                if (tb_node_title.empty()) {
+                    tb_node_msg = "title is empty";
+                } else if (!physics || !db) {
+                    tb_node_msg = "no active project";
+                } else {
+                    const double now_ts = unix_now();
+                    const long long new_id = static_cast<long long>(stored_nodes.size());
+                    const float angle = 0.7f * static_cast<float>(new_id);
+                    const Vector3 spawn{
+                        8.0f * std::cos(angle),
+                        0.0f,
+                        8.0f * std::sin(angle),
+                    };
+                    zg::persistence::StoredNode n{};
+                    n.id           = new_id;
+                    n.position     = spawn;
+                    n.title        = tb_node_title;
+                    n.content      = "";
+                    n.first_seen   = now_ts;
+                    n.last_touched = now_ts;
+                    n.tier         = kToolbarTiers[tb_node_tier_idx];
+                    stored_nodes.push_back(std::move(n));
+                    physics->enqueue_node(spawn);
+                    db->save_graph(stored_nodes, edges);
+                    tb_node_msg = "added " + tb_node_title;
+                    tb_node_title.clear();
+                }
+            }
+            if (!tb_node_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_node_msg.c_str());
+            }
+
+            ImGui::Separator();
+
+            static std::string tb_phantom_label;
+            static std::string tb_phantom_msg;
+            static long long   tb_phantom_id_counter = 1000000;
+
+            ImGui::TextDisabled("inject phantom");
+            const bool phantom_submitted = ImGui::InputText("label##tb_phantom", &tb_phantom_label,
+                                                            ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) tb_phantom_msg.clear();
+            if (ImGui::Button("inject") || phantom_submitted) {
+                zg::telemetry::Phantom p{};
+                p.id         = tb_phantom_id_counter++;
+                p.position   = {0.0f, 6.0f, 0.0f};
+                p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
+                p.spawn_time = GetTime();
+                phantom_buffer.add(p);
+                tb_phantom_msg = "injected id " + std::to_string(p.id);
+                tb_phantom_label.clear();
+            }
+            if (!tb_phantom_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
+            }
+
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Help")) {
+            ImGui::TextDisabled("LEFT-CLICK         select node");
+            ImGui::TextDisabled("RIGHT-DRAG         orbit");
+            ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
+            ImGui::TextDisabled("SCROLL WHEEL       zoom");
+            ImGui::TextDisabled("R KEY              reset view");
+            ImGui::TextDisabled("H KEY              rabbit hole");
+            ImGui::TextDisabled("B KEY              throw the bones");
+            ImGui::TextDisabled("ESC x 3            wipe + exit");
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
         ImGui::End();
 
         // Bones scratch panel — separate ImGui window, opens when a throw
@@ -938,8 +1208,20 @@ int main() {
         // Each chosen-node row is a Selectable: clicking it smooth-flies the
         // camera to that node and updates the inspector selection.
         if (bones.panel_open) {
-            ImGui::SetNextWindowPos(ImVec2(420, 16), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(360, 320), ImGuiCond_FirstUseEver);
+            // Place the bones panel next to the main window if there's room,
+            // otherwise stack it below so it stays fully on-screen.
+            const float scr_w = static_cast<float>(GetScreenWidth());
+            const float scr_h = static_cast<float>(GetScreenHeight());
+            const bool  side_by_side = scr_w > (main_w + 360.0f + 48.0f);
+            const ImVec2 bones_pos  = side_by_side
+                ? ImVec2(main_w + 32.0f, 16.0f)
+                : ImVec2(16.0f, std::min(main_h + 32.0f, scr_h - 200.0f));
+            const ImVec2 bones_size{
+                std::min(360.0f, scr_w - bones_pos.x - 16.0f),
+                std::min(320.0f, scr_h - bones_pos.y - 16.0f),
+            };
+            ImGui::SetNextWindowPos (bones_pos,  ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(bones_size, ImGuiCond_FirstUseEver);
             if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
                 ImGui::TextDisabled("what connects these?  (click a node to travel)");
                 ImGui::Separator();
@@ -983,19 +1265,22 @@ int main() {
     }
 
     telemetry.stop();
-    physics.stop();
+    if (physics) physics->stop();
 
-    // Persist the converged layout. Titles and content carry through from the
-    // last load (or are empty on first run until the markdown editor lands).
-    std::vector<Vector3>         final_positions;
-    std::vector<zg::graph::Edge> final_edges;
-    buffer.snapshot(final_positions, final_edges);
-    stored_nodes.resize(final_positions.size());
-    for (std::size_t i = 0; i < final_positions.size(); ++i) {
-        stored_nodes[i].id       = static_cast<long long>(i);
-        stored_nodes[i].position = final_positions[i];
+    // Persist the converged layout for the currently-active project. Just
+    // sync positions back into stored_nodes; don't rebuild ids or shrink
+    // the vector — click-to-pin nodes are already in stored_nodes and
+    // would be lost by a naive resize+id-assign.
+    if (db) {
+        std::vector<Vector3> final_positions;
+        buffer.snapshot(final_positions);
+        for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
+            stored_nodes[i].position = final_positions[i];
+        }
+        db->save_graph(stored_nodes, edges);
     }
-    db.save_graph(stored_nodes, final_edges);
+    physics.reset();
+    db.reset();
 
     UnloadRenderTexture(scene_rt);
     UnloadShader(crt_shader);

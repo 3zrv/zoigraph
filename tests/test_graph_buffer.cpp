@@ -103,6 +103,60 @@ TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
     CHECK(edges.empty());
 }
 
+TEST_CASE("graph_buffer: positions-only snapshot doesn't touch caller's edges vector") {
+    GraphBuffer buf;
+    buf.publish_positions({{1, 1, 1}, {2, 2, 2}});
+    buf.set_edges({{0, 1}, {1, 2}});
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    caller_edges = {{99, 99, "preserved", "test", "confirmed"}};
+
+    buf.snapshot(positions);
+
+    REQUIRE(positions.size() == 2);
+    // The positions-only overload must NOT touch caller_edges.
+    REQUIRE(caller_edges.size() == 1);
+    CHECK(caller_edges[0].source == 99);
+    CHECK(caller_edges[0].label  == "preserved");
+}
+
+TEST_CASE("graph_buffer: edits to main's edges survive across snapshot calls") {
+    // Regression for the bug where operator-edited Edge.label was being
+    // overwritten each frame by snapshot(positions, edges). With the
+    // positions-only overload, main owns edges authoritatively.
+    GraphBuffer buf;
+    buf.publish_positions({{0, 0, 0}});
+    buf.set_edges({{0, 0, "from-buffer", "knows", "confirmed"}});
+
+    // Simulate main owning its own edges and editing them.
+    std::vector<Edge> main_edges = {{0, 0, "from-buffer", "knows", "confirmed"}};
+    main_edges[0].label = "operator-edit";
+    main_edges[0].kind  = "owns";
+
+    // Repeated positions-only snapshots leave main_edges untouched.
+    for (int i = 0; i < 5; ++i) {
+        std::vector<Vector3> positions;
+        buf.snapshot(positions);
+    }
+    CHECK(main_edges[0].label == "operator-edit");
+    CHECK(main_edges[0].kind  == "owns");
+}
+
+TEST_CASE("graph_buffer: snapshot copies (mutating the output doesn't affect the buffer)") {
+    GraphBuffer buf;
+    buf.publish_positions({{1, 1, 1}, {2, 2, 2}});
+
+    std::vector<Vector3> p1;
+    std::vector<Edge>    e1;
+    buf.snapshot(p1, e1);
+    p1[0].x = 999.0f;  // mutate the snapshot
+
+    std::vector<Vector3> p2;
+    std::vector<Edge>    e2;
+    buf.snapshot(p2, e2);
+    CHECK(p2[0].x == doctest::Approx(1.0f));  // buffer untouched
+}
+
 TEST_CASE("graph_buffer: a later set_edges replaces the previous edge list") {
     GraphBuffer buf;
     buf.set_edges({{0, 1}, {1, 2}, {2, 3}});

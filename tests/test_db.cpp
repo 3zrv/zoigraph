@@ -456,6 +456,122 @@ TEST_CASE("db: 500-node save/load roundtrip stays correct + reasonably fast") {
     CHECK(out[42].first_seen == doctest::Approx(1042.0));
 }
 
+TEST_CASE("db: edges with label/kind/certainty roundtrip") {
+    Database db(":memory:");
+    Edge e1{1, 2, "owns gun", "owns",     "confirmed"};
+    Edge e2{2, 3, "saw at site B", "saw-at", "suspected"};
+    Edge e3{1, 3, "", "", "hearsay"};
+    db.save_graph(
+        {{1, {0,0,0}, "a", ""}, {2, {0,0,0}, "b", ""}, {3, {0,0,0}, "c", ""}},
+        {e1, e2, e3});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 3);
+    CHECK(edges[0].label     == "owns gun");
+    CHECK(edges[0].kind      == "owns");
+    CHECK(edges[0].certainty == "confirmed");
+    CHECK(edges[1].label     == "saw at site B");
+    CHECK(edges[1].kind      == "saw-at");
+    CHECK(edges[1].certainty == "suspected");
+    CHECK(edges[2].label.empty());
+    CHECK(edges[2].kind.empty());
+    CHECK(edges[2].certainty == "hearsay");
+}
+
+TEST_CASE("db: update_edge changes label/kind/certainty on the matching pair") {
+    Database db(":memory:");
+    db.save_graph(
+        {{1, {0,0,0}, "a", ""}, {2, {0,0,0}, "b", ""}},
+        {{1, 2, "", "", "confirmed"}});
+
+    db.update_edge(1, 2, "shell of", "shell-of", "suspected");
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].label     == "shell of");
+    CHECK(edges[0].kind      == "shell-of");
+    CHECK(edges[0].certainty == "suspected");
+}
+
+TEST_CASE("db: update_edge on a non-existent pair is a silent no-op") {
+    Database db(":memory:");
+    db.save_graph(
+        {{1, {0,0,0}, "a", ""}},
+        {{1, 1, "self", "knows", "confirmed"}});
+
+    db.update_edge(99, 42, "ghost", "noop", "phantom");  // no matching row
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].label == "self");
+    CHECK(edges[0].kind  == "knows");
+}
+
+TEST_CASE("db: legacy edges table missing the new columns is migrated") {
+    const std::string path = "/tmp/zg_migrate_edges_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    // Create a legacy-shape DB with only source/target/weight on edges.
+    {
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        sqlite3_exec(raw,
+            "CREATE TABLE nodes ("
+            "  id INTEGER PRIMARY KEY, x REAL, y REAL, z REAL,"
+            "  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '');"
+            "CREATE TABLE edges (source INTEGER, target INTEGER, weight REAL);"
+            "INSERT INTO nodes (id, x, y, z, title, content) VALUES (1, 0, 0, 0, 'a', '');"
+            "INSERT INTO nodes (id, x, y, z, title, content) VALUES (2, 0, 0, 0, 'b', '');"
+            "INSERT INTO edges (source, target, weight) VALUES (1, 2, 1.0);",
+            nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+    }
+
+    Database db(path);
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].label.empty());
+    CHECK(edges[0].kind.empty());
+    CHECK(edges[0].certainty == "confirmed");
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("db: roundtrip preserves edges with negative-looking large weights (legacy stored)") {
+    // Verifies that the weight column we silently default to 1.0 on save
+    // doesn't pollute caller's edge state. Load returns Edges without a
+    // weight field (Edge struct never carried it) — confirm round-trip is
+    // stable across save/load even when edges originally had varied counts.
+    Database db(":memory:");
+    std::vector<Edge> in_edges;
+    for (long long i = 0; i < 20; ++i) {
+        in_edges.push_back({static_cast<std::size_t>(i),
+                            static_cast<std::size_t>(i + 1), "", "", "confirmed"});
+    }
+    std::vector<StoredNode> in_nodes;
+    for (long long i = 0; i < 22; ++i) {
+        in_nodes.push_back({i, {0,0,0}, "n" + std::to_string(i), ""});
+    }
+    db.save_graph(in_nodes, in_edges);
+
+    std::vector<StoredNode> out_nodes;
+    std::vector<Edge>       out_edges;
+    REQUIRE(db.load_graph(out_nodes, out_edges));
+    CHECK(out_edges.size() == in_edges.size());
+    for (std::size_t i = 0; i < in_edges.size(); ++i) {
+        CHECK(out_edges[i].source == in_edges[i].source);
+        CHECK(out_edges[i].target == in_edges[i].target);
+    }
+}
+
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});

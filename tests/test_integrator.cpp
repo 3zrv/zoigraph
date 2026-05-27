@@ -196,6 +196,21 @@ TEST_CASE("integrator: phantoms do not accumulate reaction forces themselves") {
     CHECK(positions[0].x < 0.0f);  // static node still moved
 }
 
+TEST_CASE("integrator: damping = 1.0 preserves velocity indefinitely under no forces") {
+    std::vector<Vector3> positions  = {{0, 0, 0}};
+    std::vector<Vector3> velocities = {{2.0f, 0, 0}};
+    SimParams params = zero_forces();
+    params.damping = 1.0f;
+
+    for (int i = 0; i < 50; ++i) {
+        integrate_step(positions, velocities, {}, params);
+    }
+    // No damping, no force: velocity stays exactly 2.0 (modulo float drift).
+    CHECK(velocities[0].x == doctest::Approx(2.0f));
+    // Position drifts at v*dt per tick; 50 ticks at dt=0.05 = 2.5s, displacement 5.0.
+    CHECK(positions[0].x == doctest::Approx(5.0f).epsilon(0.01f));
+}
+
 TEST_CASE("integrator: zero-velocity node with no forces does not drift") {
     std::vector<Vector3> positions  = {{1.0f, 2.0f, 3.0f}};
     std::vector<Vector3> velocities = {{0, 0, 0}};

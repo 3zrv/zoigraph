@@ -23,6 +23,10 @@ public:
     // halt decay when a phantom is promoted to a Static Node.
     void remove(long long id);
 
+    // Drops every phantom currently in the buffer. Used on project switch
+    // so phantoms from the previous session don't bleed into the new one.
+    void clear();
+
     std::size_t size() const;
 
 private:
