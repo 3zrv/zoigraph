@@ -110,6 +110,11 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- render (shaders + imgui theme + camera + small draw helpers) ----------
+add_library(zg_render STATIC src/render/imgui_theme.cpp)
+target_include_directories(zg_render PUBLIC src)
+target_link_libraries(zg_render PUBLIC imgui)
+
 # ---- input (pure key/event state machines, testable without raylib) --------
 add_library(zg_input STATIC src/input/escape_wipe.cpp)
 target_include_directories(zg_input PUBLIC src)
@@ -165,6 +170,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_persistence
     zg_telemetry
     zg_input
+    zg_render
     raylib
     rlimgui
     imgui
