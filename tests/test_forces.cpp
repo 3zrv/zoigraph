@@ -118,3 +118,54 @@ TEST_CASE("hooke: zero stiffness yields zero force") {
     CHECK(near(f.y, 0.0f));
     CHECK(near(f.z, 0.0f));
 }
+
+TEST_CASE("hooke: action equals negative reaction for any pair") {
+    // Newton's third law for the spring: swapping a and b flips the sign
+    // exactly. Sample several geometries to catch axis-specific bugs.
+    const Vector3 cases[][2] = {
+        {{1, 0, 0}, {5, 0, 0}},
+        {{0, 0, 0}, {0, 3, 4}},
+        {{-1, -2, -3}, {4, 5, 6}},
+    };
+    for (const auto& c : cases) {
+        const Vector3 fa = hooke_force(c[0], c[1], 1.0f, 0.5f);
+        const Vector3 fb = hooke_force(c[1], c[0], 1.0f, 0.5f);
+        CHECK(near(fa.x, -fb.x));
+        CHECK(near(fa.y, -fb.y));
+        CHECK(near(fa.z, -fb.z));
+    }
+}
+
+TEST_CASE("coulomb: force magnitude falls off as 1 over r squared") {
+    // |F| = k * qa * qb / r^2. Doubling r should quarter the force.
+    auto magnitude = [](Vector3 v) {
+        return std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    };
+    const Vector3 f_near = coulomb_force({0, 0, 0}, {2, 0, 0}, 1.0f, 1.0f, 1.0f);
+    const Vector3 f_far  = coulomb_force({0, 0, 0}, {4, 0, 0}, 1.0f, 1.0f, 1.0f);
+
+    // m_near = 1/4, m_far = 1/16 → ratio 4.
+    CHECK(magnitude(f_near) / magnitude(f_far) == doctest::Approx(4.0f).epsilon(0.01f));
+}
+
+TEST_CASE("coulomb: zero charge on either endpoint yields zero force") {
+    // Force magnitude is k * q_a * q_b / r^2 — if either charge is zero
+    // the whole product is zero regardless of how close the two are.
+    Vector3 f1 = coulomb_force({0, 0, 0}, {1, 0, 0}, 0.0f, 1.0f, 100.0f);
+    Vector3 f2 = coulomb_force({0, 0, 0}, {1, 0, 0}, 1.0f, 0.0f, 100.0f);
+    for (const auto& f : {f1, f2}) {
+        CHECK(near(f.x, 0.0f));
+        CHECK(near(f.y, 0.0f));
+        CHECK(near(f.z, 0.0f));
+    }
+}
+
+TEST_CASE("hooke: rest_length of zero gives pure attraction along the axis") {
+    // With rest = 0, the spring tries to collapse the two points. Force on
+    // `a` should point toward `b` with magnitude stiffness * distance.
+    Vector3 f = hooke_force({0, 0, 0}, {3, 4, 0}, 0.0f, 1.0f);
+    // distance = 5, magnitude = 5, direction = (3/5, 4/5, 0).
+    CHECK(near(f.x, 3.0f));
+    CHECK(near(f.y, 4.0f));
+    CHECK(near(f.z, 0.0f));
+}

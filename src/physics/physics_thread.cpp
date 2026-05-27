@@ -1,22 +1,29 @@
 #include "physics/physics_thread.h"
 
+#include <raylib.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 
+#include "physics/barnes_hut.h"
 #include "physics/forces.h"
+#include "telemetry/phantom.h"
 
 namespace zg::physics {
 
 PhysicsThread::PhysicsThread(std::vector<Vector3> initial_positions,
                              std::vector<graph::Edge> edges,
                              graph::GraphBuffer& buffer,
+                             telemetry::PhantomBuffer* phantom_buffer,
                              SimParams params)
     : positions_(std::move(initial_positions)),
       velocities_(positions_.size(), Vector3{0.0f, 0.0f, 0.0f}),
       edges_(std::move(edges)),
       buffer_(buffer),
-      params_(params) {
+      phantom_buffer_(phantom_buffer),
+      params_(params),
+      use_barnes_hut_(params.use_barnes_hut) {
     buffer_.set_edges(edges_);
     buffer_.publish_positions(positions_);
 }
@@ -33,6 +40,11 @@ void PhysicsThread::start() {
 void PhysicsThread::stop() {
     if (!running_.exchange(false)) return;
     if (worker_.joinable()) worker_.join();
+}
+
+void PhysicsThread::enqueue_node(Vector3 position) {
+    std::lock_guard<std::mutex> lock(pending_mu_);
+    pending_additions_.push_back(position);
 }
 
 void PhysicsThread::run() {
@@ -52,16 +64,24 @@ void PhysicsThread::run() {
 void integrate_step(std::vector<Vector3>& positions,
                     std::vector<Vector3>& velocities,
                     const std::vector<graph::Edge>& edges,
-                    const SimParams& params) {
+                    const SimParams& params,
+                    const std::vector<Vector3>& phantom_positions) {
     const std::size_t n = positions.size();
     std::vector<Vector3> forces(n, Vector3{0.0f, 0.0f, 0.0f});
 
-    // Pairwise Coulomb repulsion (O(N^2) — naive; Barnes-Hut comes later).
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = i + 1; j < n; ++j) {
-            const Vector3 f = coulomb_force(positions[i], positions[j], 1.0f, 1.0f, params.repulsion_k);
-            forces[i].x += f.x; forces[i].y += f.y; forces[i].z += f.z;
-            forces[j].x -= f.x; forces[j].y -= f.y; forces[j].z -= f.z;
+    if (params.use_barnes_hut) {
+        // Tree-accelerated O(N log N) Coulomb pass.
+        apply_barnes_hut_repulsion(positions, forces, params.repulsion_k, params.bh_theta);
+    } else {
+        // Naive O(N^2) pairwise — preserved for the off-toggle path and for
+        // small-N tests where the constant factor of building a tree isn't
+        // worth it.
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = i + 1; j < n; ++j) {
+                const Vector3 f = coulomb_force(positions[i], positions[j], 1.0f, 1.0f, params.repulsion_k);
+                forces[i].x += f.x; forces[i].y += f.y; forces[i].z += f.z;
+                forces[j].x -= f.x; forces[j].y -= f.y; forces[j].z -= f.z;
+            }
         }
     }
 
@@ -80,6 +100,19 @@ void integrate_step(std::vector<Vector3>& positions,
         forces[i].x -= params.center_k * positions[i].x;
         forces[i].y -= params.center_k * positions[i].y;
         forces[i].z -= params.center_k * positions[i].z;
+    }
+
+    // One-way phantom repulsion: each phantom shoves nearby static nodes
+    // with a much stronger Coulomb constant than static-vs-static. Phantoms
+    // do NOT accumulate reaction force — they're anchored at telemetry
+    // coordinates and never integrate.
+    for (const Vector3& ph : phantom_positions) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const Vector3 f = coulomb_force(positions[i], ph, 1.0f, 1.0f, params.phantom_repulsion_k);
+            forces[i].x += f.x;
+            forces[i].y += f.y;
+            forces[i].z += f.z;
+        }
     }
 
     // Symplectic Euler integration with velocity damping and a hard speed cap.
@@ -105,7 +138,30 @@ void integrate_step(std::vector<Vector3>& positions,
 }
 
 void PhysicsThread::step() {
-    integrate_step(positions_, velocities_, edges_, params_);
+    // Drain queued node additions before integrating. Each new node enters
+    // at zero velocity; the integrator picks it up on the same tick.
+    {
+        std::lock_guard<std::mutex> lock(pending_mu_);
+        for (const Vector3& pos : pending_additions_) {
+            positions_.push_back(pos);
+            velocities_.push_back({0.0f, 0.0f, 0.0f});
+        }
+        pending_additions_.clear();
+    }
+
+    std::vector<Vector3> phantom_positions;
+    if (phantom_buffer_) {
+        std::vector<telemetry::Phantom> phantoms;
+        phantom_buffer_->snapshot_and_expire(phantoms, params_.phantom_ttl, GetTime());
+        phantom_positions.reserve(phantoms.size());
+        for (const auto& p : phantoms) phantom_positions.push_back(p.position);
+    }
+
+    // Pull the runtime toggle through to SimParams so the integrator picks
+    // up the latest setting without a restart.
+    SimParams effective    = params_;
+    effective.use_barnes_hut = use_barnes_hut_.load();
+    integrate_step(positions_, velocities_, edges_, effective, phantom_positions);
 }
 
 }  // namespace zg::physics

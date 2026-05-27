@@ -94,19 +94,27 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(doctest)
 
 # ---- physics (pure functions, separately testable) -------------------------
-add_library(zg_physics STATIC src/physics/forces.cpp)
+add_library(zg_physics STATIC
+    src/physics/forces.cpp
+    src/physics/barnes_hut.cpp
+)
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
 # ---- graph (thread-safe buffer between physics and render) -----------------
-add_library(zg_graph STATIC src/graph/graph_buffer.cpp)
+add_library(zg_graph STATIC
+    src/graph/graph_buffer.cpp
+    src/graph/picks.cpp
+)
 target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
 
 # ---- physics simulation thread ---------------------------------------------
+# Depends on zg_telemetry because the physics step now snapshots PhantomBuffer
+# to apply phantom repulsion against static nodes (directive §5.B).
 add_library(zg_physics_thread STATIC src/physics/physics_thread.cpp)
 target_include_directories(zg_physics_thread PUBLIC src)
-target_link_libraries(zg_physics_thread PUBLIC zg_physics zg_graph raylib)
+target_link_libraries(zg_physics_thread PUBLIC zg_physics zg_graph zg_telemetry raylib)
 if(NOT WIN32)
     target_link_libraries(zg_physics_thread PUBLIC pthread)
 endif()
