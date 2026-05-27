@@ -22,6 +22,7 @@
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
+#include "render/shaders.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
 #include "persistence/seed.h"
@@ -40,82 +41,9 @@ constexpr int   kTelemetryPort  = 7777;
 constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
 constexpr float kPhantomRadius  = 1.2f;    // visibly larger than static nodes
 
-// Minimal GLSL 330 shader pair for raylib's DrawMeshInstanced. The vertex
-// shader expects a per-instance mat4 named `instanceTransform`; raylib's
-// renderer wires it up via SHADER_LOC_MATRIX_MODEL.
-constexpr const char* kInstancingVS = R"GLSL(
-#version 330
-in vec3 vertexPosition;
-in vec2 vertexTexCoord;
-in vec3 vertexNormal;
-in vec4 vertexColor;
-in mat4 instanceTransform;
-
-out vec2 fragTexCoord;
-out vec4 fragColor;
-
-uniform mat4 mvp;
-
-void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor    = vertexColor;
-    gl_Position  = mvp * instanceTransform * vec4(vertexPosition, 1.0);
-}
-)GLSL";
-
-constexpr const char* kInstancingFS = R"GLSL(
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-
-uniform vec4 colDiffuse;
-
-out vec4 finalColor;
-
-void main() {
-    finalColor = colDiffuse;
-}
-)GLSL";
-
-// CRT post-process: chromatic aberration, scrolling scanlines, vignette.
-// Operates over fragTexCoord (0..1) from a fullscreen draw of the scene
-// RenderTexture. Resolution and time uniforms drive the per-frame look.
-constexpr const char* kCrtFS = R"GLSL(
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-
-uniform sampler2D texture0;
-uniform vec4 colDiffuse;
-uniform vec2 resolution;
-uniform float time;
-
-out vec4 finalColor;
-
-void main() {
-    vec2 uv = fragTexCoord;
-    vec2 center = vec2(0.5, 0.5);
-
-    // Chromatic aberration: separate R / B sampling offsets, growing with
-    // distance from screen center.
-    vec2 ab = (uv - center) * 0.0035;
-    float r = texture(texture0, uv + ab).r;
-    float g = texture(texture0, uv).g;
-    float b = texture(texture0, uv - ab).b;
-    vec3 col = vec3(r, g, b);
-
-    // Scanlines: vertical sinusoid in pixel space, slowly scrolling.
-    float scan = sin((uv.y * resolution.y + time * 18.0) * 1.4) * 0.5 + 0.5;
-    col *= mix(0.78, 1.0, scan);
-
-    // Vignette: darken everything outside the central 60%.
-    float d = length(uv - center);
-    float vignette = smoothstep(0.85, 0.35, d);
-    col *= vignette;
-
-    finalColor = vec4(col, 1.0) * colDiffuse;
-}
-)GLSL";
+using zg::render::kInstancingVS;
+using zg::render::kInstancingFS;
+using zg::render::kCrtFS;
 
 void apply_terminal_theme() {
     ImGuiStyle& style = ImGui::GetStyle();
