@@ -116,7 +116,10 @@ target_include_directories(zg_app PUBLIC src)
 target_link_libraries(zg_app PUBLIC zg_persistence zg_physics_thread zg_graph zg_telemetry)
 
 # ---- ui (ImGui tab renderers) ----------------------------------------------
-add_library(zg_ui STATIC src/ui/toolbar_tab.cpp)
+add_library(zg_ui STATIC
+    src/ui/toolbar_tab.cpp
+    src/ui/inspector_tab.cpp
+)
 target_include_directories(zg_ui PUBLIC src)
 target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry imgui raylib)
 
