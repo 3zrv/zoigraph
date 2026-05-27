@@ -398,6 +398,76 @@ TEST_CASE("PhysicsThread: enqueue_node is drained on the next tick") {
     CHECK(std::fabs(positions[1].z - 5.0f) < 2.0f);
 }
 
+TEST_CASE("integrator: out-of-bounds edges are silently skipped (no crash)") {
+    // A DB loaded with orphan edges (target references a node that was
+    // never re-saved) should not crash the integrator; the bad edge is
+    // dropped and the rest of the simulation proceeds.
+    std::vector<Vector3> positions  = {{0, 0, 0}, {2, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}, {0, 0, 0}};
+    SimParams params = zero_forces();
+    params.spring_k = 0.5f;
+    params.spring_rest = 2.0f;
+    const std::vector<Edge> edges = {
+        {0, 1},          // valid
+        {0, 999},        // orphan: out of bounds
+        {500, 1000},     // both out of bounds
+        {1, 0},          // valid
+    };
+
+    integrate_step(positions, velocities, edges, params);
+    integrate_step(positions, velocities, edges, params);
+
+    // No out-of-bounds read happened; positions remain finite.
+    for (const auto& p : positions) {
+        CHECK_FALSE(std::isnan(p.x));
+        CHECK_FALSE(std::isnan(p.y));
+        CHECK_FALSE(std::isnan(p.z));
+    }
+}
+
+TEST_CASE("PhysicsThread: enqueue_edge before start() lands on the first tick") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.enqueue_edge({0, 1});
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 0);
+    CHECK(edges[0].target == 1);
+}
+
+TEST_CASE("PhysicsThread: set_use_barnes_hut toggles cleanly at runtime") {
+    GraphBuffer buffer;
+    // Start with BH off.
+    SimParams p{};
+    p.use_barnes_hut = false;
+    PhysicsThread physics({{0, 0, 0}, {1, 0, 0}, {-1, 0, 0}}, {}, buffer, nullptr, p);
+    physics.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    CHECK_FALSE(physics.use_barnes_hut());
+    physics.set_use_barnes_hut(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(physics.use_barnes_hut());
+
+    physics.set_use_barnes_hut(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(physics.use_barnes_hut());
+
+    // The simulation is still alive after multiple toggles.
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+    REQUIRE(positions.size() == 3);
+}
+
 TEST_CASE("PhysicsThread: enqueue_edge appears in the buffer's edge snapshot") {
     // After enqueue_edge drains on the next tick, the physics thread
     // republishes edges_ to the buffer so the render-side snapshot picks

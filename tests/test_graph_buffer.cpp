@@ -63,6 +63,17 @@ TEST_CASE("graph_buffer: set_edges is independent of positions") {
     CHECK(edges[2].target == 3);
 }
 
+TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
+    GraphBuffer buf;
+    buf.set_edges({{0, 1}, {1, 2}});
+    buf.set_edges({});  // explicitly clear
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buf.snapshot(positions, edges);
+    CHECK(edges.empty());
+}
+
 TEST_CASE("graph_buffer: a later set_edges replaces the previous edge list") {
     GraphBuffer buf;
     buf.set_edges({{0, 1}, {1, 2}, {2, 3}});

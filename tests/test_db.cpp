@@ -319,6 +319,18 @@ TEST_CASE("db: an 8 KB content blob roundtrips exactly") {
     CHECK(nodes[0].content.size() == 8192);
 }
 
+TEST_CASE("db: search query containing punctuation sanitizes safely") {
+    // The parser strips anything non-alphanumeric, so "it's" becomes "it s"
+    // → "it* s*". A naive concatenation into the FTS5 query string without
+    // sanitization would explode on the apostrophe.
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "it's complicated", ""}}, {});
+
+    CHECK(db.search("it's").size() == 1);
+    CHECK(db.search("complicated").size() == 1);
+    CHECK(db.search("'; DROP TABLE nodes; --").empty());
+}
+
 TEST_CASE("db: repeated update_node_text final-write-wins") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "v1", ""}}, {});

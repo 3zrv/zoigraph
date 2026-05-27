@@ -77,6 +77,22 @@ TEST_CASE("picks: fully-connected graph still returns 3 distinct nodes (fallback
     CHECK(all_distinct(pick));
 }
 
+TEST_CASE("picks: same seed produces the same triple (determinism)") {
+    // Determinism over a fixed seed lets future features replay or test
+    // bones throws against a known answer.
+    std::vector<Edge> edges = {{0, 1}, {2, 3}};
+    std::mt19937 rng_a(0xC0FFEE);
+    std::mt19937 rng_b(0xC0FFEE);
+
+    const auto a = pick_weakly_connected_triple(20, edges, rng_a);
+    const auto b = pick_weakly_connected_triple(20, edges, rng_b);
+    REQUIRE(a.size() == 3);
+    REQUIRE(b.size() == 3);
+    CHECK(a[0] == b[0]);
+    CHECK(a[1] == b[1]);
+    CHECK(a[2] == b[2]);
+}
+
 TEST_CASE("picks: result indices are always within [0, node_count)") {
     std::vector<Edge> edges = {{0, 5}, {2, 7}, {1, 3}};
     std::mt19937 rng(13);

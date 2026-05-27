@@ -94,8 +94,11 @@ void integrate_step(std::vector<Vector3>& positions,
         }
     }
 
-    // Hooke attraction along edges.
+    // Hooke attraction along edges. Out-of-bounds edges (e.g. orphans loaded
+    // from a DB that drifted out of sync with nodes) are silently skipped
+    // rather than read past the end of positions/forces.
     for (const graph::Edge& e : edges) {
+        if (e.source >= n || e.target >= n) continue;
         const Vector3 f = hooke_force(positions[e.source], positions[e.target],
                                        params.spring_rest, params.spring_k);
         forces[e.source].x += f.x; forces[e.source].y += f.y; forces[e.source].z += f.z;
