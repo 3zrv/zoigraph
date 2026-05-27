@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -194,6 +195,32 @@ TEST_CASE("integrator: phantoms do not accumulate reaction forces themselves") {
     CHECK(phantoms[0].y == phantom_before.y);
     CHECK(phantoms[0].z == phantom_before.z);
     CHECK(positions[0].x < 0.0f);  // static node still moved
+}
+
+TEST_CASE("integrator: 50 randomly-seeded nodes never exceed max_speed under heavy repulsion") {
+    // Stress test: many nodes packed close together with strong repulsion.
+    // The velocity clamp must keep every component within max_speed even
+    // when the integrator sees huge forces in early ticks.
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> d(-2.0f, 2.0f);
+    std::vector<Vector3> positions, velocities;
+    for (int i = 0; i < 50; ++i) {
+        positions.push_back({d(rng), d(rng), d(rng)});
+        velocities.push_back({0, 0, 0});
+    }
+    SimParams params{};
+    params.repulsion_k = 200.0f;
+    params.max_speed   = 20.0f;
+    params.damping     = 0.95f;
+    params.dt          = 0.05f;
+
+    for (int t = 0; t < 50; ++t) {
+        integrate_step(positions, velocities, {}, params);
+    }
+    for (const auto& v : velocities) {
+        const float speed = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        CHECK(speed <= params.max_speed + 1e-3f);
+    }
 }
 
 TEST_CASE("integrator: damping = 1.0 preserves velocity indefinitely under no forces") {

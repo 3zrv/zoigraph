@@ -69,6 +69,18 @@ TEST_CASE("seed: content fields are sensible defaults") {
     CHECK(g.nodes[2].content.empty());
 }
 
+TEST_CASE("seed: same now_unix twice produces identical graphs") {
+    const auto a = make_initial_graph(7777.0);
+    const auto b = make_initial_graph(7777.0);
+    REQUIRE(a.nodes.size() == b.nodes.size());
+    for (std::size_t i = 0; i < a.nodes.size(); ++i) {
+        CHECK(a.nodes[i].id == b.nodes[i].id);
+        CHECK(a.nodes[i].title == b.nodes[i].title);
+        CHECK(a.nodes[i].first_seen   == doctest::Approx(b.nodes[i].first_seen));
+        CHECK(a.nodes[i].last_touched == doctest::Approx(b.nodes[i].last_touched));
+    }
+}
+
 TEST_CASE("seed: positions are distinct (nodes don't pile at origin)") {
     const auto g = make_initial_graph(0.0);
     REQUIRE(g.nodes.size() == 3);

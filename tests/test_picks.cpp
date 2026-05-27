@@ -101,6 +101,19 @@ TEST_CASE("picks: edge direction doesn't matter for adjacency") {
     }
 }
 
+TEST_CASE("picks: graph with a node count exactly equal to 3 always returns those 3") {
+    std::vector<Edge> edges = {{0, 1}};  // one edge between 0 and 1
+    std::mt19937 rng(0);
+    // With only 3 nodes total, a valid triple is always (0,1,2) — the
+    // picker will fall back to the K4-style branch when no non-adjacent
+    // triple exists.
+    for (int trial = 0; trial < 10; ++trial) {
+        const auto pick = pick_weakly_connected_triple(3, edges, rng);
+        REQUIRE(pick.size() == 3);
+        CHECK(all_distinct(pick));
+    }
+}
+
 TEST_CASE("picks: same seed produces the same triple (determinism)") {
     // Determinism over a fixed seed lets future features replay or test
     // bones throws against a known answer.

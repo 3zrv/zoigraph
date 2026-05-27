@@ -151,6 +151,39 @@ TEST_CASE("barnes_hut: 200-particle stress stays close to naive at theta=0.7") {
     CHECK(within >= static_cast<int>(positions.size()) * 9 / 10);
 }
 
+TEST_CASE("barnes_hut: theta=0.3 (stricter) is even closer to naive than 0.7") {
+    // Lower theta -> more recursion into subdivisions -> closer to naive.
+    std::mt19937 rng(0xDEAD);
+    std::uniform_real_distribution<float> d(-15.0f, 15.0f);
+    std::vector<Vector3> positions;
+    for (int i = 0; i < 30; ++i) positions.push_back({d(rng), d(rng), d(rng)});
+
+    const float k = 50.0f;
+    const auto naive = naive_pairwise(positions, k);
+
+    std::vector<Vector3> bh_default(30, Vector3{0, 0, 0});
+    std::vector<Vector3> bh_strict (30, Vector3{0, 0, 0});
+    apply_barnes_hut_repulsion(positions, bh_default, k, 0.7f);
+    apply_barnes_hut_repulsion(positions, bh_strict,  k, 0.3f);
+
+    float total_default_err = 0.0f, total_strict_err = 0.0f;
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        total_default_err += relative_error(bh_default[i], naive[i]);
+        total_strict_err  += relative_error(bh_strict[i],  naive[i]);
+    }
+    CHECK(total_strict_err <= total_default_err + 1e-4f);
+}
+
+TEST_CASE("barnes_hut: huge repulsion_k near-coincident produces no NaN/inf") {
+    std::vector<Vector3> positions = {{0.001f, 0, 0}, {-0.001f, 0, 0}};
+    std::vector<Vector3> forces(2, Vector3{0, 0, 0});
+    apply_barnes_hut_repulsion(positions, forces, 1.0e8f, 0.5f);
+    for (const auto& f : forces) {
+        CHECK_FALSE(std::isnan(f.x));
+        CHECK_FALSE(std::isinf(f.x));
+    }
+}
+
 TEST_CASE("barnes_hut: forces are added to, not overwritten") {
     // The caller may already have accumulated Hooke / centering / phantom
     // forces by the time the BH pass runs. Verify those contributions

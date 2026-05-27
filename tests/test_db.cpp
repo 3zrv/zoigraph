@@ -572,6 +572,52 @@ TEST_CASE("db: roundtrip preserves edges with negative-looking large weights (le
     }
 }
 
+TEST_CASE("db: opening the same file twice doesn't re-migrate or corrupt data") {
+    // Migration is gated on column existence; opening an already-migrated
+    // file should be idempotent.
+    const std::string path = "/tmp/zg_idempotent_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    {
+        Database db(path);
+        db.save_graph({{1, {0,0,0}, "stable", "body"}}, {{1, 1, "self-link", "knows", "confirmed"}});
+    }
+    {
+        Database db(path);  // second open, should not re-migrate
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].title == "stable");
+        REQUIRE(edges.size() == 1);
+        CHECK(edges[0].label == "self-link");
+    }
+    {
+        Database db(path);  // third open
+        std::vector<StoredNode> nodes;
+        std::vector<Edge>       edges;
+        REQUIRE(db.load_graph(nodes, edges));
+        CHECK(nodes[0].title == "stable");
+    }
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("db: edge label of 4 KB roundtrips byte-exact") {
+    Database db(":memory:");
+    std::string huge_label(4096, 'L');
+    db.save_graph(
+        {{1, {0,0,0}, "a", ""}, {2, {0,0,0}, "b", ""}},
+        {{1, 2, huge_label, "knows", "confirmed"}});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].label.size() == 4096);
+    CHECK(edges[0].label == huge_label);
+}
+
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
