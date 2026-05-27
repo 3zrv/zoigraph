@@ -417,6 +417,45 @@ TEST_CASE("db: legacy table missing new columns is migrated on open") {
     std::remove(path.c_str());
 }
 
+TEST_CASE("db: update_node_tier on a non-existent id is a silent no-op") {
+    Database db(":memory:");
+    db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});
+    db.update_node_tier(9999, "phantom");  // should not throw
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].id == 1);
+    CHECK(out[0].tier == "confirmed");
+}
+
+TEST_CASE("db: 500-node save/load roundtrip stays correct + reasonably fast") {
+    Database db(":memory:");
+    std::vector<StoredNode> in;
+    in.reserve(500);
+    for (long long i = 0; i < 500; ++i) {
+        StoredNode n{};
+        n.id           = i;
+        n.position     = {static_cast<float>(i), 0, 0};
+        n.title        = "node-" + std::to_string(i);
+        n.first_seen   = 1000.0 + static_cast<double>(i);
+        n.last_touched = 2000.0 + static_cast<double>(i);
+        n.tier         = (i % 3 == 0) ? "confirmed" : (i % 3 == 1 ? "suspected" : "phantom");
+        in.push_back(std::move(n));
+    }
+    db.save_graph(in, {});
+
+    std::vector<StoredNode> out;
+    std::vector<Edge>       e;
+    REQUIRE(db.load_graph(out, e));
+    REQUIRE(out.size() == 500);
+    CHECK(out[0].title   == "node-0");
+    CHECK(out[499].title == "node-499");
+    CHECK(out[42].tier   == "confirmed");
+    CHECK(out[42].first_seen == doctest::Approx(1042.0));
+}
+
 TEST_CASE("db: search query containing punctuation sanitizes safely") {
     // The parser strips anything non-alphanumeric, so "it's" becomes "it s"
     // → "it* s*". A naive concatenation into the FTS5 query string without

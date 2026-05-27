@@ -67,6 +67,26 @@ TEST_CASE("wikilinks: empty target [[]] yields an empty string entry") {
     CHECK(out[0].empty());
 }
 
+TEST_CASE("wikilinks: single brackets inside an open [[ are kept in the target") {
+    // Once we're inside a [[, a plain "[" or "]" character is part of the
+    // target until we see "]]" (or another "[[" which restarts the scan).
+    const auto out = extract_wikilinks("[[some [bracketed] text]] rest");
+    REQUIRE(out.size() == 1);
+    CHECK(out[0] == "some [bracketed] text");
+}
+
+TEST_CASE("wikilinks: many links in a long content blob") {
+    std::string content;
+    for (int i = 0; i < 200; ++i) {
+        content += "filler text ";
+        content += "[[node-" + std::to_string(i) + "]] ";
+    }
+    const auto out = extract_wikilinks(content);
+    REQUIRE(out.size() == 200);
+    CHECK(out[0]   == "node-0");
+    CHECK(out[199] == "node-199");
+}
+
 TEST_CASE("wikilinks: adjacent links with no separator both extract") {
     const auto out = extract_wikilinks("[[a]][[b]]");
     REQUIRE(out.size() == 2);

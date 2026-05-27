@@ -57,6 +57,18 @@ TEST_CASE("escape_wipe: triple after a long pause requires three new presses") {
     CHECK     (w.record(300.4, 1.0));
 }
 
+TEST_CASE("escape_wipe: zero window only triggers when all stamps are equal") {
+    EscapeWipe w;
+    w.record(100.0, 0.0);
+    w.record(100.0, 0.0);
+    CHECK(w.record(100.0, 0.0));  // all three identical -> max - min = 0
+
+    EscapeWipe w2;
+    w2.record(100.0, 0.0);
+    w2.record(100.0, 0.0);
+    CHECK_FALSE(w2.record(100.000001, 0.0));  // tiny drift defeats zero window
+}
+
 TEST_CASE("escape_wipe: configurable window") {
     EscapeWipe w;
     w.record(100.0, 0.2);

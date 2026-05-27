@@ -137,6 +137,22 @@ TEST_CASE("integrator: velocity clamp caps speed even under extreme repulsion") 
     }
 }
 
+TEST_CASE("integrator: phantom_repulsion_k = 0 disables phantom shoves") {
+    // Even with phantoms present, a zero coefficient turns them into no-ops.
+    SimParams params = zero_forces();
+    params.phantom_repulsion_k = 0.0f;
+
+    std::vector<Vector3> positions  = {{0, 0, 0}};
+    std::vector<Vector3> velocities = {{0, 0, 0}};
+    const std::vector<Vector3> phantoms = {{1.0f, 0, 0}, {0, 1.0f, 0}};
+
+    for (int i = 0; i < 30; ++i) {
+        integrate_step(positions, velocities, {}, params, phantoms);
+    }
+    CHECK(positions[0].x == doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(positions[0].y == doctest::Approx(0.0f).epsilon(1e-5));
+}
+
 TEST_CASE("integrator: a phantom shoves a nearby static node away") {
     // Per directive §5.B, phantoms apply one-way Coulomb repulsion with a
     // much larger coefficient than static-vs-static. A static node placed

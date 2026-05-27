@@ -129,6 +129,28 @@ TEST_CASE("barnes_hut: coincident particles don't produce NaN or inf") {
     }
 }
 
+TEST_CASE("barnes_hut: 200-particle stress stays close to naive at theta=0.7") {
+    // Scaled-up version of the smaller correctness test: a real-ish cluster
+    // size, default theta, expect most particles within 15% of naive.
+    std::mt19937 rng(0xCAFEBABE);
+    std::uniform_real_distribution<float> d(-20.0f, 20.0f);
+    std::vector<Vector3> positions;
+    positions.reserve(200);
+    for (int i = 0; i < 200; ++i) positions.push_back({d(rng), d(rng), d(rng)});
+
+    const float k = 60.0f;
+    const auto naive = naive_pairwise(positions, k);
+
+    std::vector<Vector3> bh(positions.size(), Vector3{0, 0, 0});
+    apply_barnes_hut_repulsion(positions, bh, k, 0.7f);
+
+    int within = 0;
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        if (relative_error(bh[i], naive[i]) < 0.15f) ++within;
+    }
+    CHECK(within >= static_cast<int>(positions.size()) * 9 / 10);
+}
+
 TEST_CASE("barnes_hut: forces are added to, not overwritten") {
     // The caller may already have accumulated Hooke / centering / phantom
     // forces by the time the BH pass runs. Verify those contributions

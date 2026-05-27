@@ -63,6 +63,24 @@ TEST_CASE("graph_buffer: set_edges is independent of positions") {
     CHECK(edges[2].target == 3);
 }
 
+TEST_CASE("graph_buffer: snapshot is non-destructive (same result on a second call)") {
+    GraphBuffer buf;
+    buf.publish_positions({{1, 1, 1}, {2, 2, 2}});
+    buf.set_edges({{0, 1}});
+
+    std::vector<Vector3> p1, p2;
+    std::vector<Edge>    e1, e2;
+    buf.snapshot(p1, e1);
+    buf.snapshot(p2, e2);
+
+    REQUIRE(p1.size() == 2);
+    REQUIRE(p2.size() == 2);
+    REQUIRE(e1.size() == 1);
+    REQUIRE(e2.size() == 1);
+    CHECK(p1[0].x == p2[0].x);
+    CHECK(e1[0].source == e2[0].source);
+}
+
 TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
     GraphBuffer buf;
     buf.set_edges({{0, 1}, {1, 2}});
