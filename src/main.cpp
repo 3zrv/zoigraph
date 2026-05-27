@@ -251,6 +251,24 @@ void update_bones(Bones& b, Camera3D& camera, float dt) {
     camera.position = Vector3Lerp(b.from_position, b.to_position, s);
 }
 
+// Re-triggers the Bones fly machinery for a single node — used by the
+// clickable rows inside the bones scratch panel. Preserves the current
+// camera offset (zoom + angle) so the view shifts to the node without
+// reframing the whole field.
+void bones_fly_to_node(Bones& b, std::size_t node_idx,
+                       const std::vector<Vector3>& positions,
+                       Camera3D& camera) {
+    if (node_idx >= positions.size()) return;
+    const Vector3 offset = Vector3Subtract(camera.position, camera.target);
+    b.from_target   = camera.target;
+    b.to_target     = positions[node_idx];
+    b.from_position = camera.position;
+    b.to_position   = Vector3Add(positions[node_idx], offset);
+    b.elapsed       = 0.0f;
+    b.duration      = 0.6f;  // snappier than the initial throw
+    b.active        = true;
+}
+
 // Walk `kRabbitHopCount` random connected edges starting at `start`. May
 // terminate early if a node has no neighbors — the macro just animates a
 // shorter trip in that case.
@@ -599,6 +617,17 @@ int main() {
             DrawSphereWires(positions[selected_node], kNodeRadius * 1.6f, 10, 10, YELLOW);
         }
 
+        // Bones halos: magenta wireframes around the 3 chosen nodes so the
+        // operator can pick them out of the red field while the scratch
+        // panel is open. Deliberately distinct from the yellow selection
+        // halo above.
+        if (bones.panel_open) {
+            for (auto i : bones.chosen) {
+                if (i >= positions.size()) continue;
+                DrawSphereWires(positions[i], kNodeRadius * 1.9f, 10, 10, MAGENTA);
+            }
+        }
+
         // Phantom nodes: additive-blended glowing wireframes whose alpha
         // fades over the 60-second TTL. Drawn after the static layer so the
         // glow accumulates against the dark background rather than mixing
@@ -736,17 +765,27 @@ int main() {
 
         // Bones scratch panel — separate ImGui window, opens when a throw
         // selects a triple and stays open until the operator closes it.
+        // Each chosen-node row is a Selectable: clicking it smooth-flies the
+        // camera to that node and updates the inspector selection.
         if (bones.panel_open) {
             ImGui::SetNextWindowPos(ImVec2(420, 16), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(360, 320), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
-                ImGui::TextDisabled("what connects these?");
+                ImGui::TextDisabled("what connects these?  (click a node to travel)");
                 ImGui::Separator();
-                for (auto i : bones.chosen) {
+                for (std::size_t slot = 0; slot < bones.chosen.size(); ++slot) {
+                    const auto i = bones.chosen[slot];
                     if (i >= stored_nodes.size()) continue;
                     const auto& sn = stored_nodes[i];
-                    ImGui::Text("[%zu] %s", i,
-                                sn.title.empty() ? "(untitled)" : sn.title.c_str());
+                    char row[320];
+                    std::snprintf(row, sizeof(row), "[%zu] %s##bones-pick-%zu",
+                                  i,
+                                  sn.title.empty() ? "(untitled)" : sn.title.c_str(),
+                                  slot);
+                    if (ImGui::Selectable(row)) {
+                        bones_fly_to_node(bones, i, positions, camera);
+                        selected_node = static_cast<int>(i);
+                    }
                 }
                 ImGui::Separator();
                 ImGui::InputTextMultiline("##bones-scratch", &bones.scratch,
