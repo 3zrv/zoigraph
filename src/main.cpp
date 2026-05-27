@@ -1088,15 +1088,6 @@ int main() {
             physics->set_use_barnes_hut(bh);
         }
         ImGui::Separator();
-        ImGui::TextDisabled("LEFT-CLICK         select node");
-        ImGui::TextDisabled("RIGHT-DRAG         orbit");
-        ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
-        ImGui::TextDisabled("SCROLL WHEEL       zoom");
-        ImGui::TextDisabled("R KEY              reset view");
-        ImGui::TextDisabled("H KEY              rabbit hole");
-        ImGui::TextDisabled("B KEY              throw the bones");
-        ImGui::TextDisabled("ESC x 3            wipe + exit");
-
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Toolbar")) {
@@ -1177,6 +1168,31 @@ int main() {
         ImGui::EndTabBar();
         }
         ImGui::End();
+
+        // Control glossary — separate window, bottom-right of the screen by
+        // default so it sits out of the way of the main panel. Clamped to
+        // fit, no resize. Operator can drag it elsewhere if they want.
+        {
+            const float scr_w  = static_cast<float>(GetScreenWidth());
+            const float scr_h  = static_cast<float>(GetScreenHeight());
+            const float help_w = std::min(300.0f, scr_w - 32.0f);
+            const float help_h = std::min(220.0f, scr_h - 32.0f);
+            const ImVec2 help_pos(
+                std::max(16.0f, scr_w - help_w - 16.0f),
+                std::max(16.0f, scr_h - help_h - 16.0f));
+            ImGui::SetNextWindowPos (help_pos,                ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(help_w, help_h),  ImGuiCond_Always);
+            ImGui::Begin("// HELP //", nullptr, ImGuiWindowFlags_NoResize);
+            ImGui::TextDisabled("LEFT-CLICK         select node");
+            ImGui::TextDisabled("RIGHT-DRAG         orbit");
+            ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
+            ImGui::TextDisabled("SCROLL WHEEL       zoom");
+            ImGui::TextDisabled("R KEY              reset view");
+            ImGui::TextDisabled("H KEY              rabbit hole");
+            ImGui::TextDisabled("B KEY              throw the bones");
+            ImGui::TextDisabled("ESC x 3            wipe + exit");
+            ImGui::End();
+        }
 
         // Bones scratch panel — separate ImGui window, opens when a throw
         // selects a triple and stays open until the operator closes it.
