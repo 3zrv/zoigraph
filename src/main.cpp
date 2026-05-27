@@ -7,8 +7,10 @@
 #include <rlImGui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <ctime>
 #include <random>
 #include <vector>
 
@@ -157,6 +159,14 @@ void apply_terminal_theme() {
     c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.00f, 0.00f, 0.80f);
     c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.00f, 0.00f, 0.80f);
     c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.00f, 0.00f, 0.80f);
+}
+
+// Wall-clock Unix seconds. Stable across process restarts (unlike raylib's
+// GetTime which resets each launch), so it's what we persist for
+// first_seen / last_touched.
+double unix_now() {
+    using namespace std::chrono;
+    return duration<double>(system_clock::now().time_since_epoch()).count();
 }
 
 constexpr Vector3 kCameraDefaultPos       = {60.0f, 60.0f, 60.0f};
@@ -476,8 +486,15 @@ int main() {
         initial_positions = make_initial_positions(kNodeCount);
         initial_edges     = make_random_edges(kNodeCount, kEdgeCount);
         stored_nodes.reserve(initial_positions.size());
+        const double now_ts = unix_now();
         for (std::size_t i = 0; i < initial_positions.size(); ++i) {
-            stored_nodes.push_back({static_cast<long long>(i), initial_positions[i], "", ""});
+            zg::persistence::StoredNode n{};
+            n.id           = static_cast<long long>(i);
+            n.position     = initial_positions[i];
+            n.first_seen   = now_ts;
+            n.last_touched = now_ts;
+            n.tier         = "confirmed";
+            stored_nodes.push_back(std::move(n));
         }
     }
 
@@ -568,10 +585,21 @@ int main() {
                 // Promote: halt decay, append a Static Node carrying the
                 // phantom's label as title, materialize any jagged-edge
                 // connections as real graph edges, save to disk, queue
-                // both node and edges into physics, then select.
+                // both node and edges into physics, then select. Promoted
+                // node enters the "phantom" tier (visibly distinct from
+                // confirmed Static Nodes).
                 const auto& ph = phantoms[phantom_hit];
                 const long long new_id = static_cast<long long>(stored_nodes.size());
-                stored_nodes.push_back({new_id, ph.position, ph.label, ""});
+                const double promoted_ts = unix_now();
+                zg::persistence::StoredNode promoted{};
+                promoted.id           = new_id;
+                promoted.position     = ph.position;
+                promoted.title        = ph.label;
+                promoted.content      = "";
+                promoted.first_seen   = promoted_ts;
+                promoted.last_touched = promoted_ts;
+                promoted.tier         = "phantom";
+                stored_nodes.push_back(std::move(promoted));
 
                 for (long long target_id : ph.connections) {
                     if (target_id < 0) continue;
@@ -624,6 +652,18 @@ int main() {
         for (const auto& e : edges) {
             if (e.source < positions.size() && e.target < positions.size()) {
                 DrawLine3D(positions[e.source], positions[e.target], MAROON);
+            }
+        }
+
+        // Tier indicators: every non-confirmed node gets a small wireframe
+        // halo whose color reflects its tier. Confirmed nodes stay bare
+        // (the bulk of the field) so the few tiered ones pop visually.
+        for (std::size_t i = 0; i < positions.size() && i < stored_nodes.size(); ++i) {
+            const auto& tier = stored_nodes[i].tier;
+            if (tier == "suspected") {
+                DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, ORANGE);
+            } else if (tier == "phantom") {
+                DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
             }
         }
 
@@ -733,6 +773,39 @@ int main() {
             ImGui::Spacing();
 
             auto& sn = stored_nodes[selected_node];
+
+            // Tier picker: drives halo color in the 3D view and persists
+            // immediately on change (no save-to-disk required).
+            static const char* kTiers[] = {"confirmed", "suspected", "phantom"};
+            int tier_idx = 0;
+            for (int t = 0; t < 3; ++t) {
+                if (sn.tier == kTiers[t]) { tier_idx = t; break; }
+            }
+            if (ImGui::Combo("tier", &tier_idx, kTiers, 3)) {
+                sn.tier = kTiers[tier_idx];
+                db.update_node_tier(sn.id, sn.tier);
+            }
+
+            // Timestamps — read-only display. 0 means "unknown" (legacy row
+            // from before the schema migration).
+            if (sn.first_seen > 0.0) {
+                const std::time_t t = static_cast<std::time_t>(sn.first_seen);
+                char buf[32];
+                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+                ImGui::Text("first seen   %s", buf);
+            } else {
+                ImGui::TextDisabled("first seen   (unknown)");
+            }
+            if (sn.last_touched > 0.0) {
+                const std::time_t t = static_cast<std::time_t>(sn.last_touched);
+                char buf[32];
+                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+                ImGui::Text("last touched %s", buf);
+            } else {
+                ImGui::TextDisabled("last touched (unknown)");
+            }
+            ImGui::Spacing();
+
             bool text_changed = false;
             text_changed |= ImGui::InputText("title", &sn.title);
             ImGui::TextDisabled("content (markdown)");
@@ -742,7 +815,9 @@ int main() {
             if (text_changed) {
                 // Persist the edit immediately so search picks it up on the
                 // next keystroke; triggers keep the FTS index in sync.
-                db.update_node_text(sn.id, sn.title, sn.content);
+                const double now_ts = unix_now();
+                sn.last_touched = now_ts;
+                db.update_node_text(sn.id, sn.title, sn.content, now_ts);
                 // The query may now have new hits.
                 search_hits = db.search(search_query);
 
