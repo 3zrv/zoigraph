@@ -398,6 +398,70 @@ TEST_CASE("PhysicsThread: enqueue_node is drained on the next tick") {
     CHECK(std::fabs(positions[1].z - 5.0f) < 2.0f);
 }
 
+TEST_CASE("PhysicsThread: enqueue_edge appears in the buffer's edge snapshot") {
+    // After enqueue_edge drains on the next tick, the physics thread
+    // republishes edges_ to the buffer so the render-side snapshot picks
+    // them up without main needing to manually set_edges.
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_edge({0, 1});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 0);
+    CHECK(edges[0].target == 1);
+}
+
+TEST_CASE("PhysicsThread: many enqueue_edge calls all land via the buffer") {
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {3, 0, 0}},
+                          {}, buffer, nullptr);
+    physics.start();
+    physics.enqueue_edge({0, 1});
+    physics.enqueue_edge({1, 2});
+    physics.enqueue_edge({2, 3});
+    physics.enqueue_edge({0, 3});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    CHECK(edges.size() == 4);
+}
+
+TEST_CASE("PhysicsThread: enqueue_node + enqueue_edge in one click batch") {
+    // Mirrors the click-to-pin flow: a new node and several edges referencing
+    // its index get pushed at the same time. Both must land together so the
+    // edges' source index resolves to a real position by the next tick.
+    GraphBuffer buffer;
+    PhysicsThread physics({{0, 0, 0}, {5, 0, 0}}, {}, buffer, nullptr);
+    physics.start();
+
+    physics.enqueue_node({10, 0, 0});
+    physics.enqueue_edge({2, 0});
+    physics.enqueue_edge({2, 1});
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    std::vector<Vector3> positions;
+    std::vector<Edge>    edges;
+    buffer.snapshot(positions, edges);
+    physics.stop();
+
+    REQUIRE(positions.size() == 3);
+    REQUIRE(edges.size() == 2);
+    CHECK(edges[0].source == 2);
+    CHECK(edges[1].source == 2);
+}
+
 TEST_CASE("PhysicsThread: multiple enqueue_node calls all land") {
     GraphBuffer buffer;
     PhysicsThread physics({{0.0f, 0.0f, 0.0f}}, {}, buffer, nullptr);

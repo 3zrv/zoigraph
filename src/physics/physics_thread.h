@@ -65,6 +65,11 @@ public:
     // running physics loop. The node starts at `position` with zero velocity.
     void enqueue_node(Vector3 position);
 
+    // Queues a new edge to be added to the simulation at the start of the
+    // next tick. Used when a pinned phantom carries `connections` that should
+    // become permanent springs in the graph. Thread-safe.
+    void enqueue_edge(graph::Edge edge);
+
     // Toggle Barnes-Hut at runtime. Cheap, lock-free, takes effect on the
     // next tick. False switches back to the naive O(N^2) Coulomb loop.
     void set_use_barnes_hut(bool use) { use_barnes_hut_.store(use); }
@@ -81,11 +86,12 @@ private:
     telemetry::PhantomBuffer*     phantom_buffer_;
     SimParams                     params_;
 
-    std::atomic<bool>      running_{false};
-    std::atomic<bool>      use_barnes_hut_;
-    std::thread            worker_;
-    std::mutex             pending_mu_;
-    std::vector<Vector3>   pending_additions_;
+    std::atomic<bool>          running_{false};
+    std::atomic<bool>          use_barnes_hut_;
+    std::thread                worker_;
+    std::mutex                 pending_mu_;
+    std::vector<Vector3>       pending_additions_;
+    std::vector<graph::Edge>   pending_edges_;
 };
 
 }  // namespace zg::physics

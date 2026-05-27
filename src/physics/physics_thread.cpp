@@ -47,6 +47,11 @@ void PhysicsThread::enqueue_node(Vector3 position) {
     pending_additions_.push_back(position);
 }
 
+void PhysicsThread::enqueue_edge(graph::Edge edge) {
+    std::lock_guard<std::mutex> lock(pending_mu_);
+    pending_edges_.push_back(edge);
+}
+
 void PhysicsThread::run() {
     using clock = std::chrono::steady_clock;
     const auto tick = std::chrono::microseconds(1'000'000 / std::max(1, params_.target_hz));
@@ -55,6 +60,10 @@ void PhysicsThread::run() {
         const auto t0 = clock::now();
         step();
         buffer_.publish_positions(positions_);
+        // Republish edges each tick so the buffer stays consistent with the
+        // physics thread's view after enqueue_edge drains. Cost is one vector
+        // copy at the buffer-set mutex (microseconds at this scale).
+        buffer_.set_edges(edges_);
 
         const auto elapsed = clock::now() - t0;
         if (elapsed < tick) std::this_thread::sleep_for(tick - elapsed);
@@ -138,8 +147,8 @@ void integrate_step(std::vector<Vector3>& positions,
 }
 
 void PhysicsThread::step() {
-    // Drain queued node additions before integrating. Each new node enters
-    // at zero velocity; the integrator picks it up on the same tick.
+    // Drain queued node and edge additions before integrating. Each new node
+    // enters at zero velocity; the integrator picks both up on the same tick.
     {
         std::lock_guard<std::mutex> lock(pending_mu_);
         for (const Vector3& pos : pending_additions_) {
@@ -147,6 +156,11 @@ void PhysicsThread::step() {
             velocities_.push_back({0.0f, 0.0f, 0.0f});
         }
         pending_additions_.clear();
+
+        for (const graph::Edge& e : pending_edges_) {
+            edges_.push_back(e);
+        }
+        pending_edges_.clear();
     }
 
     std::vector<Vector3> phantom_positions;

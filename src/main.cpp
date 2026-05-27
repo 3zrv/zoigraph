@@ -565,11 +565,24 @@ int main() {
 
             if (phantom_hit >= 0) {
                 // Promote: halt decay, append a Static Node carrying the
-                // phantom's label as title, save to disk, queue it into
-                // physics, and select the new node.
+                // phantom's label as title, materialize any jagged-edge
+                // connections as real graph edges, save to disk, queue
+                // both node and edges into physics, then select.
                 const auto& ph = phantoms[phantom_hit];
                 const long long new_id = static_cast<long long>(stored_nodes.size());
                 stored_nodes.push_back({new_id, ph.position, ph.label, ""});
+
+                for (long long target_id : ph.connections) {
+                    if (target_id < 0) continue;
+                    const auto tidx = static_cast<std::size_t>(target_id);
+                    if (tidx >= positions.size()) continue;
+                    if (tidx == static_cast<std::size_t>(new_id)) continue;
+                    const zg::graph::Edge new_edge{
+                        static_cast<std::size_t>(new_id), tidx};
+                    edges.push_back(new_edge);
+                    physics.enqueue_edge(new_edge);
+                }
+
                 phantom_buffer.remove(ph.id);
                 db.save_graph(stored_nodes, edges);
                 physics.enqueue_node(ph.position);
