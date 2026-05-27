@@ -787,9 +787,16 @@ int main() {
         }
 
         rlImGuiBegin();
-        ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(360, 600), ImGuiCond_FirstUseEver);
-        ImGui::Begin("// INSPECTOR //");
+
+        // Main control panel — fixed-size, position remembered after the
+        // first frame. Width clamps to fit the screen so on narrow displays
+        // the panel never overflows; ImGui's built-in scrollbar handles
+        // vertical overflow inside the tab content.
+        const float main_w = std::min(380.0f, static_cast<float>(GetScreenWidth())  - 32.0f);
+        const float main_h = std::min(720.0f, static_cast<float>(GetScreenHeight()) - 32.0f);
+        ImGui::SetNextWindowPos (ImVec2(16, 16),       ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(main_w, main_h), ImGuiCond_Always);
+        ImGui::Begin("// ZOIGRAPH //", nullptr, ImGuiWindowFlags_NoResize);
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
 
@@ -885,6 +892,9 @@ int main() {
         }
         ImGui::Separator();
         // ---- /PROJECT --------------------------------------------------
+
+        if (ImGui::BeginTabBar("zg_tabs")) {
+        if (ImGui::BeginTabItem("Inspector")) {
 
         ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
         ImGui::Text("edges    %d", static_cast<int>(edges.size()));
@@ -1086,6 +1096,86 @@ int main() {
         ImGui::TextDisabled("H KEY              rabbit hole");
         ImGui::TextDisabled("B KEY              throw the bones");
         ImGui::TextDisabled("ESC x 3            wipe + exit");
+
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Toolbar")) {
+            // Toolbar tab — manual node creation and local phantom injection.
+            // Same data paths used by click-to-pin and the UDP listener, so
+            // operators get a quick way to grow the graph without leaving
+            // the keyboard or running an external tool.
+
+            static std::string tb_node_title;
+            static std::string tb_node_msg;
+            static int         tb_node_tier_idx = 0;
+            static const char* kToolbarTiers[] = {"confirmed", "suspected", "phantom"};
+
+            ImGui::TextDisabled("create static node");
+            const bool node_submitted = ImGui::InputText("title##tb_node", &tb_node_title,
+                                                         ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) tb_node_msg.clear();
+            ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
+            if (ImGui::Button("create node") || node_submitted) {
+                if (tb_node_title.empty()) {
+                    tb_node_msg = "title is empty";
+                } else if (!physics || !db) {
+                    tb_node_msg = "no active project";
+                } else {
+                    const double now_ts = unix_now();
+                    const long long new_id = static_cast<long long>(stored_nodes.size());
+                    const float angle = 0.7f * static_cast<float>(new_id);
+                    const Vector3 spawn{
+                        8.0f * std::cos(angle),
+                        0.0f,
+                        8.0f * std::sin(angle),
+                    };
+                    zg::persistence::StoredNode n{};
+                    n.id           = new_id;
+                    n.position     = spawn;
+                    n.title        = tb_node_title;
+                    n.content      = "";
+                    n.first_seen   = now_ts;
+                    n.last_touched = now_ts;
+                    n.tier         = kToolbarTiers[tb_node_tier_idx];
+                    stored_nodes.push_back(std::move(n));
+                    physics->enqueue_node(spawn);
+                    db->save_graph(stored_nodes, edges);
+                    tb_node_msg = "added " + tb_node_title;
+                    tb_node_title.clear();
+                }
+            }
+            if (!tb_node_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_node_msg.c_str());
+            }
+
+            ImGui::Separator();
+
+            static std::string tb_phantom_label;
+            static std::string tb_phantom_msg;
+            static long long   tb_phantom_id_counter = 1000000;
+
+            ImGui::TextDisabled("inject phantom");
+            const bool phantom_submitted = ImGui::InputText("label##tb_phantom", &tb_phantom_label,
+                                                            ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemEdited()) tb_phantom_msg.clear();
+            if (ImGui::Button("inject") || phantom_submitted) {
+                zg::telemetry::Phantom p{};
+                p.id         = tb_phantom_id_counter++;
+                p.position   = {0.0f, 6.0f, 0.0f};
+                p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
+                p.spawn_time = GetTime();
+                phantom_buffer.add(p);
+                tb_phantom_msg = "injected id " + std::to_string(p.id);
+                tb_phantom_label.clear();
+            }
+            if (!tb_phantom_msg.empty()) {
+                ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
+            }
+
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
         ImGui::End();
 
         // Bones scratch panel — separate ImGui window, opens when a throw
@@ -1093,8 +1183,20 @@ int main() {
         // Each chosen-node row is a Selectable: clicking it smooth-flies the
         // camera to that node and updates the inspector selection.
         if (bones.panel_open) {
-            ImGui::SetNextWindowPos(ImVec2(420, 16), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(360, 320), ImGuiCond_FirstUseEver);
+            // Place the bones panel next to the main window if there's room,
+            // otherwise stack it below so it stays fully on-screen.
+            const float scr_w = static_cast<float>(GetScreenWidth());
+            const float scr_h = static_cast<float>(GetScreenHeight());
+            const bool  side_by_side = scr_w > (main_w + 360.0f + 48.0f);
+            const ImVec2 bones_pos  = side_by_side
+                ? ImVec2(main_w + 32.0f, 16.0f)
+                : ImVec2(16.0f, std::min(main_h + 32.0f, scr_h - 200.0f));
+            const ImVec2 bones_size{
+                std::min(360.0f, scr_w - bones_pos.x - 16.0f),
+                std::min(320.0f, scr_h - bones_pos.y - 16.0f),
+            };
+            ImGui::SetNextWindowPos (bones_pos,  ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(bones_size, ImGuiCond_FirstUseEver);
             if (ImGui::Begin("// THROW THE BONES //", &bones.panel_open)) {
                 ImGui::TextDisabled("what connects these?  (click a node to travel)");
                 ImGui::Separator();
@@ -1117,88 +1219,6 @@ int main() {
                                           ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10));
                 if (ImGui::Button("throw again")) {
                     throw_bones(bones, positions, edges, camera, rabbit_rng);
-                }
-            }
-            ImGui::End();
-        }
-
-        // // TOOLBAR // — separate panel beside/below the inspector. Two
-        // small forms: one creates a Static Node in the active project, the
-        // other injects a Phantom into the local PhantomBuffer (same data
-        // path as a UDP datagram would take). Window is independent of the
-        // inspector; the operator can drag, resize, or let it sit hidden
-        // behind the inspector.
-        {
-            ImGui::SetNextWindowPos(ImVec2(16, 640), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(360, 240), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("// TOOLBAR //")) {
-                static std::string tb_node_title;
-                static std::string tb_node_msg;
-                static int         tb_node_tier_idx = 0;
-                static const char* kToolbarTiers[] = {"confirmed", "suspected", "phantom"};
-
-                ImGui::TextDisabled("create static node");
-                const bool node_submitted = ImGui::InputText("title##tb_node", &tb_node_title,
-                                                             ImGuiInputTextFlags_EnterReturnsTrue);
-                if (ImGui::IsItemEdited()) tb_node_msg.clear();
-                ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
-                if (ImGui::Button("create node") || node_submitted) {
-                    if (tb_node_title.empty()) {
-                        tb_node_msg = "title is empty";
-                    } else if (!physics || !db) {
-                        tb_node_msg = "no active project";
-                    } else {
-                        const double now_ts = unix_now();
-                        const long long new_id = static_cast<long long>(stored_nodes.size());
-                        // Spread new nodes around a circle near the cluster
-                        // center so they don't pile on top of each other.
-                        const float angle = 0.7f * static_cast<float>(new_id);
-                        const Vector3 spawn{
-                            8.0f * std::cos(angle),
-                            0.0f,
-                            8.0f * std::sin(angle),
-                        };
-                        zg::persistence::StoredNode n{};
-                        n.id           = new_id;
-                        n.position     = spawn;
-                        n.title        = tb_node_title;
-                        n.content      = "";
-                        n.first_seen   = now_ts;
-                        n.last_touched = now_ts;
-                        n.tier         = kToolbarTiers[tb_node_tier_idx];
-                        stored_nodes.push_back(std::move(n));
-                        physics->enqueue_node(spawn);
-                        db->save_graph(stored_nodes, edges);
-                        tb_node_msg = "added " + tb_node_title;
-                        tb_node_title.clear();
-                    }
-                }
-                if (!tb_node_msg.empty()) {
-                    ImGui::TextDisabled("%s", tb_node_msg.c_str());
-                }
-
-                ImGui::Separator();
-
-                static std::string tb_phantom_label;
-                static std::string tb_phantom_msg;
-                static long long   tb_phantom_id_counter = 1000000;
-
-                ImGui::TextDisabled("inject phantom");
-                const bool phantom_submitted = ImGui::InputText("label##tb_phantom", &tb_phantom_label,
-                                                                ImGuiInputTextFlags_EnterReturnsTrue);
-                if (ImGui::IsItemEdited()) tb_phantom_msg.clear();
-                if (ImGui::Button("inject") || phantom_submitted) {
-                    zg::telemetry::Phantom p{};
-                    p.id         = tb_phantom_id_counter++;
-                    p.position   = {0.0f, 6.0f, 0.0f};
-                    p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
-                    p.spawn_time = GetTime();
-                    phantom_buffer.add(p);
-                    tb_phantom_msg = "injected id " + std::to_string(p.id);
-                    tb_phantom_label.clear();
-                }
-                if (!tb_phantom_msg.empty()) {
-                    ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
                 }
             }
             ImGui::End();
