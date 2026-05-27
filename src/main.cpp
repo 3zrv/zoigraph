@@ -21,6 +21,8 @@
 #include "graph/timeline.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
+#include "app/clock.h"
+#include "app/session.h"
 #include "input/escape_wipe.h"
 #include "macros/bones.h"
 #include "macros/rabbit_hole.h"
@@ -50,14 +52,7 @@ using zg::render::kInstancingVS;
 using zg::render::kInstancingFS;
 using zg::render::kCrtFS;
 
-// Wall-clock Unix seconds. Stable across process restarts (unlike raylib's
-// GetTime which resets each launch), so it's what we persist for
-// first_seen / last_touched.
-double unix_now() {
-    using namespace std::chrono;
-    return duration<double>(system_clock::now().time_since_epoch()).count();
-}
-
+using zg::app::unix_now;
 using zg::render::kCameraDefaultPos;
 using zg::render::kCameraDefaultTarget;
 using zg::render::update_orbit_camera;
@@ -121,130 +116,33 @@ int main() {
     zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
     telemetry.start();
 
-    std::unique_ptr<zg::persistence::Database>    db;
-    std::unique_ptr<zg::physics::PhysicsThread>   physics;
-    std::vector<zg::persistence::StoredNode>      stored_nodes;
-    std::string                                   current_project;
+    // All per-project state lives in Session; aliases below let the rest of
+    // main.cpp keep using the short names while open_project repopulates
+    // everything on each switch.
+    zg::app::Session session;
+    auto& db            = session.db;
+    auto& physics       = session.physics;
+    auto& stored_nodes  = session.stored_nodes;
+    auto& edges         = session.edges;
+    auto& positions     = session.positions;
+    auto& cluster_ids   = session.cluster_ids;
+    auto& tag_filter    = session.tag_filter;
+    auto& self_idx      = session.self_idx;
+    auto& timeline_mode = session.timeline_mode;
+    auto& prev_open_ts  = session.prev_open_ts;
+    auto& current_project = session.current_project;
+    auto& selected_node = session.selected_node;
+    auto& search_query  = session.search_query;
+    auto& search_hits   = session.search_hits;
 
-    // Render-loop workspace — owned by main, NOT refilled from the buffer
-    // each frame. Physics publishes positions; main owns edges. Edge
-    // metadata edits (label / kind / certainty) live here and would be
-    // clobbered if we snapshotted them back from the buffer.
-    std::vector<Vector3>         positions;
-    std::vector<zg::graph::Edge> edges;
-    std::vector<Matrix>          transforms;
-    std::vector<std::size_t>     cluster_ids;
-    std::string                  tag_filter;
-    std::size_t                  self_idx = SIZE_MAX;  // tier=="self" lookup, SIZE_MAX if absent
-    bool                         timeline_mode  = false;
-    double                       prev_open_ts   = 0.0;  // last_open_ts before this session bumped it
+    std::vector<Matrix> transforms;
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
-        // Save and tear down the current session if there is one.
-        if (physics) {
-            physics->stop();
-            std::vector<Vector3> final_positions;
-            buffer.snapshot(final_positions);
-            for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
-                stored_nodes[i].position = final_positions[i];
-            }
-            if (db) db->save_graph(stored_nodes, edges);
-            physics.reset();
-        }
-        db.reset();
-        phantom_buffer.clear();
-        stored_nodes.clear();
-        edges.clear();
-        positions.clear();
-        cluster_ids.clear();
-        tag_filter.clear();
-
-        current_project = name;
-        zg::persistence::write_last_project(kProjectsDir, name);
-        db = std::make_unique<zg::persistence::Database>(
-            zg::persistence::project_path(kProjectsDir, name).string());
-
-        std::vector<zg::graph::Edge> initial_edges;
-        std::vector<Vector3>         initial_positions;
-        if (db->load_graph(stored_nodes, initial_edges)) {
-            initial_positions.reserve(stored_nodes.size());
-            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-        } else {
-            // Fresh project: named seed (self + alice + bob, ids 0..2)
-            // followed by 300 random nodes (ids 3..302) populated with
-            // codename titles, stock content snippets, 0-3 random tags
-            // each, plus 200 random edges among them. Plenty of material
-            // for auto-cluster / filter / search the moment the project
-            // opens.
-            const double now_ts = unix_now();
-            auto seed = zg::persistence::make_initial_graph(now_ts);
-            auto fill = zg::persistence::make_random_fill(
-                /*node_count=*/300,
-                /*edge_count=*/200,
-                /*start_id=*/static_cast<long long>(seed.nodes.size()),
-                /*now_unix=*/now_ts,
-                /*spread=*/25.0f,
-                /*rng_seed=*/42,
-                /*with_data=*/true);
-            stored_nodes = std::move(seed.nodes);
-            stored_nodes.insert(stored_nodes.end(),
-                                std::make_move_iterator(fill.nodes.begin()),
-                                std::make_move_iterator(fill.nodes.end()));
-            initial_edges = std::move(seed.edges);
-            initial_edges.insert(initial_edges.end(),
-                                 fill.edges.begin(), fill.edges.end());
-            initial_positions.reserve(stored_nodes.size());
-            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
-        }
-        // Seed main's render-loop state from what's about to be handed to
-        // physics. From here on these belong to main.
-        positions = initial_positions;
-        edges     = initial_edges;
-
-        // Find the self node (tier == "self") so touch-edges and the
-        // self-pin both have a stable anchor. Falls back to SIZE_MAX if
-        // the project doesn't have one (legacy DBs or operator-deleted).
-        self_idx = SIZE_MAX;
-        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
-            if (stored_nodes[i].tier == "self") {
-                self_idx = i;
-                break;
-            }
-        }
-
-        physics = std::make_unique<zg::physics::PhysicsThread>(
-            std::move(initial_positions),
-            initial_edges,
-            buffer,
-            &phantom_buffer);
-        physics->start();
-
-        // Pin the self node at its current position so the rest of the
-        // graph arranges itself relative to a fixed center.
-        if (self_idx < positions.size()) {
-            physics->set_pin(self_idx, positions[self_idx]);
-        }
-
-        // Diff-since-last-open: snapshot the previous last_open_ts (used by
-        // the render to tint new/changed nodes) then bump it to now. Old
-        // projects without a stored value get prev_open_ts = 0, which
-        // suppresses the tints on first viewing.
-        prev_open_ts = db->meta_double("last_open_ts", 0.0);
-        db->set_meta_double("last_open_ts", unix_now());
-
-        // A project switch leaves any prior timeline-mode state behind —
-        // start the new session in force-directed mode.
-        timeline_mode = false;
+        zg::app::open_project(session, name, kProjectsDir, buffer, phantom_buffer);
     };
-
-    // Ensure there's at least one project. If projects/ is empty, "default"
-    // will be auto-created by open_project's fresh-DB branch.
     open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
 
-    int                              selected_node = -1;
-    std::string                      search_query;
-    std::vector<long long>           search_hits;
     std::vector<zg::telemetry::Phantom> phantoms;
     bool                             show_grid     = true;
     bool                             post_process  = true;

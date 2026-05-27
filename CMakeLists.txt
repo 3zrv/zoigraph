@@ -110,6 +110,11 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
+# ---- app (per-project session state + open_project) ------------------------
+add_library(zg_app STATIC src/app/session.cpp)
+target_include_directories(zg_app PUBLIC src)
+target_link_libraries(zg_app PUBLIC zg_persistence zg_physics_thread zg_graph zg_telemetry)
+
 # ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
 add_library(zg_macros STATIC
     src/macros/rabbit_hole.cpp
@@ -184,6 +189,7 @@ target_link_libraries(zoigraph PRIVATE
     zg_input
     zg_render
     zg_macros
+    zg_app
     raylib
     rlimgui
     imgui
