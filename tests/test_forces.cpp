@@ -160,6 +160,15 @@ TEST_CASE("coulomb: zero charge on either endpoint yields zero force") {
     }
 }
 
+TEST_CASE("hooke: rest_length much larger than current distance pushes apart") {
+    // Spring is heavily compressed (rest=20, current=1) → force on a should
+    // point away from b (negative x for a at origin, b at +x).
+    Vector3 f = hooke_force({0, 0, 0}, {1, 0, 0}, 20.0f, 1.0f);
+    CHECK(f.x < 0.0f);  // a is pushed away from b
+    // Magnitude = stiffness * |stretch - rest| = 1 * 19 = 19, direction -x.
+    CHECK(f.x == doctest::Approx(-19.0f).epsilon(0.01f));
+}
+
 TEST_CASE("hooke: rest_length of zero gives pure attraction along the axis") {
     // With rest = 0, the spring tries to collapse the two points. Force on
     // `a` should point toward `b` with magnitude stiffness * distance.

@@ -103,6 +103,21 @@ TEST_CASE("graph_buffer: set_edges with empty vector clears previous edges") {
     CHECK(edges.empty());
 }
 
+TEST_CASE("graph_buffer: snapshot copies (mutating the output doesn't affect the buffer)") {
+    GraphBuffer buf;
+    buf.publish_positions({{1, 1, 1}, {2, 2, 2}});
+
+    std::vector<Vector3> p1;
+    std::vector<Edge>    e1;
+    buf.snapshot(p1, e1);
+    p1[0].x = 999.0f;  // mutate the snapshot
+
+    std::vector<Vector3> p2;
+    std::vector<Edge>    e2;
+    buf.snapshot(p2, e2);
+    CHECK(p2[0].x == doctest::Approx(1.0f));  // buffer untouched
+}
+
 TEST_CASE("graph_buffer: a later set_edges replaces the previous edge list") {
     GraphBuffer buf;
     buf.set_edges({{0, 1}, {1, 2}, {2, 3}});

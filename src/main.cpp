@@ -21,6 +21,7 @@
 #include "input/escape_wipe.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
+#include "persistence/seed.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
 #include "telemetry/phantom_buffer.h"
@@ -31,10 +32,6 @@
 
 namespace {
 
-constexpr int   kNodeCount      = 500;
-constexpr int   kEdgeCount      = 30;
-constexpr float kInitialSpread  = 20.0f;
-constexpr int   kSeed           = 42;
 constexpr float kNodeRadius     = 0.5f;
 constexpr int   kTelemetryPort  = 7777;
 constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
@@ -116,31 +113,6 @@ void main() {
     finalColor = vec4(col, 1.0) * colDiffuse;
 }
 )GLSL";
-
-std::vector<Vector3> make_initial_positions(int count) {
-    std::mt19937 rng(kSeed);
-    std::uniform_real_distribution<float> dist(-kInitialSpread, kInitialSpread);
-    std::vector<Vector3> out;
-    out.reserve(count);
-    for (int i = 0; i < count; ++i) {
-        out.push_back({dist(rng), dist(rng), dist(rng)});
-    }
-    return out;
-}
-
-std::vector<zg::graph::Edge> make_random_edges(int node_count, int edge_count) {
-    std::mt19937 rng(kSeed ^ 0xBEEF);
-    std::uniform_int_distribution<int> dist(0, node_count - 1);
-    std::vector<zg::graph::Edge> out;
-    out.reserve(edge_count);
-    for (int i = 0; i < edge_count; ++i) {
-        int a = dist(rng);
-        int b = dist(rng);
-        while (b == a) b = dist(rng);
-        out.push_back({static_cast<std::size_t>(a), static_cast<std::size_t>(b)});
-    }
-    return out;
-}
 
 void apply_terminal_theme() {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -526,35 +498,14 @@ int main() {
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         } else {
-            // Fresh project: self node + kNodeCount random nodes.
-            const double now_ts = unix_now();
-            zg::persistence::StoredNode self_node{};
-            self_node.id           = 0;
-            self_node.position     = {0.0f, 0.0f, 0.0f};
-            self_node.title        = "self";
-            self_node.content      = "the operator";
-            self_node.first_seen   = now_ts;
-            self_node.last_touched = now_ts;
-            self_node.tier         = "self";
-            stored_nodes.push_back(std::move(self_node));
-            initial_positions.push_back({0.0f, 0.0f, 0.0f});
-
-            auto random_positions = make_initial_positions(kNodeCount);
-            for (std::size_t i = 0; i < random_positions.size(); ++i) {
-                initial_positions.push_back(random_positions[i]);
-                zg::persistence::StoredNode n{};
-                n.id           = static_cast<long long>(i + 1);
-                n.position     = random_positions[i];
-                n.first_seen   = now_ts;
-                n.last_touched = now_ts;
-                n.tier         = "confirmed";
-                stored_nodes.push_back(std::move(n));
-            }
-            initial_edges = make_random_edges(kNodeCount, kEdgeCount);
-            for (auto& e : initial_edges) {
-                e.source += 1;
-                e.target += 1;
-            }
+            // Fresh project: minimal seed graph from persistence/seed —
+            // self + alice + bob, no edges. The operator builds outward
+            // from there with the toolbar and click-to-pin.
+            auto seed = zg::persistence::make_initial_graph(unix_now());
+            stored_nodes = std::move(seed.nodes);
+            initial_edges = std::move(seed.edges);
+            initial_positions.reserve(stored_nodes.size());
+            for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         }
         edges_persisted = initial_edges;
         physics = std::make_unique<zg::physics::PhysicsThread>(
@@ -572,7 +523,7 @@ int main() {
     std::vector<Vector3>         positions;
     std::vector<zg::graph::Edge> edges;
     std::vector<Matrix>          transforms;
-    transforms.reserve(kNodeCount);
+    transforms.reserve(512);  // headroom for typical project sizes
 
     int                              selected_node = -1;
     std::string                      search_query;
@@ -1166,6 +1117,88 @@ int main() {
                                           ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10));
                 if (ImGui::Button("throw again")) {
                     throw_bones(bones, positions, edges, camera, rabbit_rng);
+                }
+            }
+            ImGui::End();
+        }
+
+        // // TOOLBAR // — separate panel beside/below the inspector. Two
+        // small forms: one creates a Static Node in the active project, the
+        // other injects a Phantom into the local PhantomBuffer (same data
+        // path as a UDP datagram would take). Window is independent of the
+        // inspector; the operator can drag, resize, or let it sit hidden
+        // behind the inspector.
+        {
+            ImGui::SetNextWindowPos(ImVec2(16, 640), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(360, 240), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("// TOOLBAR //")) {
+                static std::string tb_node_title;
+                static std::string tb_node_msg;
+                static int         tb_node_tier_idx = 0;
+                static const char* kToolbarTiers[] = {"confirmed", "suspected", "phantom"};
+
+                ImGui::TextDisabled("create static node");
+                const bool node_submitted = ImGui::InputText("title##tb_node", &tb_node_title,
+                                                             ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::IsItemEdited()) tb_node_msg.clear();
+                ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
+                if (ImGui::Button("create node") || node_submitted) {
+                    if (tb_node_title.empty()) {
+                        tb_node_msg = "title is empty";
+                    } else if (!physics || !db) {
+                        tb_node_msg = "no active project";
+                    } else {
+                        const double now_ts = unix_now();
+                        const long long new_id = static_cast<long long>(stored_nodes.size());
+                        // Spread new nodes around a circle near the cluster
+                        // center so they don't pile on top of each other.
+                        const float angle = 0.7f * static_cast<float>(new_id);
+                        const Vector3 spawn{
+                            8.0f * std::cos(angle),
+                            0.0f,
+                            8.0f * std::sin(angle),
+                        };
+                        zg::persistence::StoredNode n{};
+                        n.id           = new_id;
+                        n.position     = spawn;
+                        n.title        = tb_node_title;
+                        n.content      = "";
+                        n.first_seen   = now_ts;
+                        n.last_touched = now_ts;
+                        n.tier         = kToolbarTiers[tb_node_tier_idx];
+                        stored_nodes.push_back(std::move(n));
+                        physics->enqueue_node(spawn);
+                        db->save_graph(stored_nodes, edges);
+                        tb_node_msg = "added " + tb_node_title;
+                        tb_node_title.clear();
+                    }
+                }
+                if (!tb_node_msg.empty()) {
+                    ImGui::TextDisabled("%s", tb_node_msg.c_str());
+                }
+
+                ImGui::Separator();
+
+                static std::string tb_phantom_label;
+                static std::string tb_phantom_msg;
+                static long long   tb_phantom_id_counter = 1000000;
+
+                ImGui::TextDisabled("inject phantom");
+                const bool phantom_submitted = ImGui::InputText("label##tb_phantom", &tb_phantom_label,
+                                                                ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::IsItemEdited()) tb_phantom_msg.clear();
+                if (ImGui::Button("inject") || phantom_submitted) {
+                    zg::telemetry::Phantom p{};
+                    p.id         = tb_phantom_id_counter++;
+                    p.position   = {0.0f, 6.0f, 0.0f};
+                    p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
+                    p.spawn_time = GetTime();
+                    phantom_buffer.add(p);
+                    tb_phantom_msg = "injected id " + std::to_string(p.id);
+                    tb_phantom_label.clear();
+                }
+                if (!tb_phantom_msg.empty()) {
+                    ImGui::TextDisabled("%s", tb_phantom_msg.c_str());
                 }
             }
             ImGui::End();

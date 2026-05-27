@@ -137,6 +137,7 @@ endif()
 add_library(zg_persistence STATIC
     src/persistence/db.cpp
     src/persistence/project_store.cpp
+    src/persistence/seed.cpp
 )
 target_include_directories(zg_persistence PUBLIC src)
 target_link_libraries(zg_persistence PUBLIC zg_graph sqlite3 raylib)

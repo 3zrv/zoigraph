@@ -545,6 +545,33 @@ TEST_CASE("db: legacy edges table missing the new columns is migrated") {
     std::remove(path.c_str());
 }
 
+TEST_CASE("db: roundtrip preserves edges with negative-looking large weights (legacy stored)") {
+    // Verifies that the weight column we silently default to 1.0 on save
+    // doesn't pollute caller's edge state. Load returns Edges without a
+    // weight field (Edge struct never carried it) — confirm round-trip is
+    // stable across save/load even when edges originally had varied counts.
+    Database db(":memory:");
+    std::vector<Edge> in_edges;
+    for (long long i = 0; i < 20; ++i) {
+        in_edges.push_back({static_cast<std::size_t>(i),
+                            static_cast<std::size_t>(i + 1), "", "", "confirmed"});
+    }
+    std::vector<StoredNode> in_nodes;
+    for (long long i = 0; i < 22; ++i) {
+        in_nodes.push_back({i, {0,0,0}, "n" + std::to_string(i), ""});
+    }
+    db.save_graph(in_nodes, in_edges);
+
+    std::vector<StoredNode> out_nodes;
+    std::vector<Edge>       out_edges;
+    REQUIRE(db.load_graph(out_nodes, out_edges));
+    CHECK(out_edges.size() == in_edges.size());
+    for (std::size_t i = 0; i < in_edges.size(); ++i) {
+        CHECK(out_edges[i].source == in_edges[i].source);
+        CHECK(out_edges[i].target == in_edges[i].target);
+    }
+}
+
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});

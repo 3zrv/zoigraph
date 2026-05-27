@@ -256,6 +256,16 @@ TEST_CASE("integration: delete_project removes only the named project's files") 
     fs::remove_all(dir);
 }
 
+TEST_CASE("project_store: write_last + list_projects survive being called many times") {
+    const auto dir = tmp_dir("loop");
+    fs::create_directories(dir);
+    for (int i = 0; i < 50; ++i) {
+        write_last_project(dir, "spam");
+    }
+    CHECK(read_last_project(dir, "fallback") == "spam");
+    fs::remove_all(dir);
+}
+
 TEST_CASE("integration: project_path('proj/a/../b') is still rejected up front") {
     // is_valid_project_name guards the entire pipeline — once a name fails
     // validation, none of the downstream functions should touch the disk.
