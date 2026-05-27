@@ -111,9 +111,12 @@ target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
 # ---- render (shaders + imgui theme + camera + small draw helpers) ----------
-add_library(zg_render STATIC src/render/imgui_theme.cpp)
+add_library(zg_render STATIC
+    src/render/imgui_theme.cpp
+    src/render/camera.cpp
+)
 target_include_directories(zg_render PUBLIC src)
-target_link_libraries(zg_render PUBLIC imgui)
+target_link_libraries(zg_render PUBLIC imgui raylib)
 
 # ---- input (pure key/event state machines, testable without raylib) --------
 add_library(zg_input STATIC src/input/escape_wipe.cpp)

@@ -22,6 +22,7 @@
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
+#include "render/camera.h"
 #include "render/imgui_theme.h"
 #include "render/shaders.h"
 #include "persistence/db.h"
@@ -54,8 +55,10 @@ double unix_now() {
     return duration<double>(system_clock::now().time_since_epoch()).count();
 }
 
-constexpr Vector3 kCameraDefaultPos       = {60.0f, 60.0f, 60.0f};
-constexpr Vector3 kCameraDefaultTarget    = {0.0f, 0.0f, 0.0f};
+using zg::render::kCameraDefaultPos;
+using zg::render::kCameraDefaultTarget;
+using zg::render::update_orbit_camera;
+
 constexpr float   kRabbitSegmentDuration  = 1.5f;  // seconds per hop
 constexpr int     kRabbitHopCount         = 3;     // directive §5.C: "through 3 random, connected edges"
 
@@ -264,59 +267,6 @@ void draw_jagged_line(Vector3 a, Vector3 b, Color color, double time, long long 
         prev = jagged;
     }
     DrawLine3D(prev, b, color);
-}
-
-// Custom orbit camera: right-drag rotates around the target, Shift+right-drag
-// pans, scroll dollies, R resets. Gated against ImGui mouse-capture so
-// dragging on the inspector doesn't reach through to the 3D layer.
-void update_orbit_camera(Camera3D& camera) {
-    const bool ui_has_mouse = ImGui::GetIO().WantCaptureMouse;
-    const Vector2 dm        = GetMouseDelta();
-    const float wheel       = GetMouseWheelMove();
-    const bool shift_down   = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-
-    if (!ui_has_mouse) {
-        const bool dragging = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
-                              (dm.x != 0.0f || dm.y != 0.0f);
-
-        if (dragging && shift_down) {
-            const Vector3 offset = Vector3Subtract(camera.position, camera.target);
-            const Vector3 right  = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
-            const Vector3 up     = Vector3Normalize(Vector3CrossProduct(Vector3Negate(offset), right));
-            const float scale    = Vector3Length(offset) * 0.0015f;
-            const Vector3 pan    = Vector3Add(Vector3Scale(right, -dm.x * scale),
-                                              Vector3Scale(up,    dm.y * scale));
-            camera.position = Vector3Add(camera.position, pan);
-            camera.target   = Vector3Add(camera.target,   pan);
-        } else if (dragging) {
-            Vector3 offset = Vector3Subtract(camera.position, camera.target);
-
-            // Yaw around the world up axis.
-            offset = Vector3RotateByAxisAngle(offset, camera.up, -dm.x * 0.005f);
-
-            // Pitch around the camera-right axis, clamped to avoid gimbal flip.
-            const Vector3 right = Vector3Normalize(Vector3CrossProduct(camera.up, Vector3Negate(offset)));
-            const Vector3 pitched = Vector3RotateByAxisAngle(offset, right, -dm.y * 0.005f);
-            const Vector3 dir = Vector3Normalize(pitched);
-            if (std::fabs(Vector3DotProduct(dir, camera.up)) < 0.985f) {
-                offset = pitched;
-            }
-            camera.position = Vector3Add(camera.target, offset);
-        }
-
-        if (wheel != 0.0f) {
-            Vector3 offset = Vector3Subtract(camera.position, camera.target);
-            float distance = Vector3Length(offset);
-            distance = std::clamp(distance * (1.0f - wheel * 0.1f), 2.0f, 500.0f);
-            offset = Vector3Scale(Vector3Normalize(offset), distance);
-            camera.position = Vector3Add(camera.target, offset);
-        }
-    }
-
-    if (IsKeyPressed(KEY_R)) {
-        camera.position = kCameraDefaultPos;
-        camera.target   = kCameraDefaultTarget;
-    }
 }
 
 }  // namespace
