@@ -512,12 +512,24 @@ int main() {
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         } else {
-            // Fresh project: minimal seed graph from persistence/seed —
-            // self + alice + bob, no edges. The operator builds outward
-            // from there with the toolbar and click-to-pin.
-            auto seed = zg::persistence::make_initial_graph(unix_now());
+            // Fresh project: named seed (self + alice + bob, ids 0..2)
+            // followed by 300 random untitled nodes (ids 3..302) and 30
+            // random edges among them. Plenty for the operator to test
+            // auto-cluster / filter / search without manually filling.
+            const double now_ts = unix_now();
+            auto seed = zg::persistence::make_initial_graph(now_ts);
+            auto fill = zg::persistence::make_random_fill(
+                /*node_count=*/300,
+                /*edge_count=*/30,
+                /*start_id=*/static_cast<long long>(seed.nodes.size()),
+                /*now_unix=*/now_ts);
             stored_nodes = std::move(seed.nodes);
+            stored_nodes.insert(stored_nodes.end(),
+                                std::make_move_iterator(fill.nodes.begin()),
+                                std::make_move_iterator(fill.nodes.end()));
             initial_edges = std::move(seed.edges);
+            initial_edges.insert(initial_edges.end(),
+                                 fill.edges.begin(), fill.edges.end());
             initial_positions.reserve(stored_nodes.size());
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         }
