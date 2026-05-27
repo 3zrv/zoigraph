@@ -4,6 +4,8 @@
 #include "persistence/seed.h"
 
 #include <cmath>
+#include <set>
+#include <string>
 
 using zg::persistence::InitialGraph;
 using zg::persistence::make_initial_graph;
@@ -140,6 +142,63 @@ TEST_CASE("random_fill: edge_count > 0 with node_count <= 1 yields no edges") {
     const auto g = make_random_fill(1, 50, 0, 0.0);
     REQUIRE(g.nodes.size() == 1);
     CHECK(g.edges.empty());
+}
+
+TEST_CASE("random_fill: with_data=false yields empty titles/content/tags") {
+    const auto g = make_random_fill(50, 0, 0, 100.0, 25.0f, 42, /*with_data=*/false);
+    REQUIRE(g.nodes.size() == 50);
+    for (const auto& n : g.nodes) {
+        CHECK(n.title.empty());
+        CHECK(n.content.empty());
+        CHECK(n.tags.empty());
+    }
+}
+
+TEST_CASE("random_fill: with_data=true populates title, content, and some tags") {
+    const auto g = make_random_fill(300, 0, 3, 100.0, 25.0f, 42, /*with_data=*/true);
+    REQUIRE(g.nodes.size() == 300);
+    int empty_title  = 0;
+    int empty_content = 0;
+    int with_tags    = 0;
+    for (const auto& n : g.nodes) {
+        if (n.title.empty())   ++empty_title;
+        if (n.content.empty()) ++empty_content;
+        if (!n.tags.empty())   ++with_tags;
+    }
+    CHECK(empty_title == 0);
+    CHECK(empty_content == 0);
+    // With tag_count uniform [0, 3], roughly 75% of nodes get >= 1 tag.
+    // Use a conservative lower bound so the test isn't flaky.
+    CHECK(with_tags > 150);
+}
+
+TEST_CASE("random_fill: with_data tags come from the known pool only") {
+    const auto g = make_random_fill(100, 0, 0, 100.0, 25.0f, 42, /*with_data=*/true);
+    const std::set<std::string> pool = {
+        "subject", "asset", "front", "hostile",
+        "deceased", "informant", "surveillance", "lead",
+    };
+    for (const auto& n : g.nodes) {
+        for (const auto& t : n.tags) {
+            CHECK(pool.count(t) == 1);
+        }
+    }
+}
+
+TEST_CASE("random_fill: with_data title contains the node id (so titles are unique)") {
+    const auto g = make_random_fill(100, 0, /*start_id=*/3, 100.0, 25.0f, 42, true);
+    std::set<std::string> seen_titles;
+    for (const auto& n : g.nodes) {
+        CHECK(seen_titles.insert(n.title).second);  // returns false if already there
+    }
+}
+
+TEST_CASE("random_fill: with_data per-node tags don't contain duplicates") {
+    const auto g = make_random_fill(300, 0, 0, 100.0, 25.0f, 42, true);
+    for (const auto& n : g.nodes) {
+        std::set<std::string> unique(n.tags.begin(), n.tags.end());
+        CHECK(unique.size() == n.tags.size());
+    }
 }
 
 TEST_CASE("seed: positions are distinct (nodes don't pile at origin)") {

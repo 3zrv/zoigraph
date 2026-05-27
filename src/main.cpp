@@ -513,16 +513,21 @@ int main() {
             for (const auto& sn : stored_nodes) initial_positions.push_back(sn.position);
         } else {
             // Fresh project: named seed (self + alice + bob, ids 0..2)
-            // followed by 300 random untitled nodes (ids 3..302) and 30
-            // random edges among them. Plenty for the operator to test
-            // auto-cluster / filter / search without manually filling.
+            // followed by 300 random nodes (ids 3..302) populated with
+            // codename titles, stock content snippets, 0-3 random tags
+            // each, plus 200 random edges among them. Plenty of material
+            // for auto-cluster / filter / search the moment the project
+            // opens.
             const double now_ts = unix_now();
             auto seed = zg::persistence::make_initial_graph(now_ts);
             auto fill = zg::persistence::make_random_fill(
                 /*node_count=*/300,
-                /*edge_count=*/30,
+                /*edge_count=*/200,
                 /*start_id=*/static_cast<long long>(seed.nodes.size()),
-                /*now_unix=*/now_ts);
+                /*now_unix=*/now_ts,
+                /*spread=*/25.0f,
+                /*rng_seed=*/42,
+                /*with_data=*/true);
             stored_nodes = std::move(seed.nodes);
             stored_nodes.insert(stored_nodes.end(),
                                 std::make_move_iterator(fill.nodes.begin()),
