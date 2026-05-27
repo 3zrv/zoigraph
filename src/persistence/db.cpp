@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS node_tags (
     tag     TEXT    NOT NULL,
     PRIMARY KEY (node_id, tag)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
     content,
@@ -351,6 +355,45 @@ void Database::update_edge(std::size_t source, std::size_t target,
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         throw_sqlite(db_, "step UPDATE edges");
+    }
+    sqlite3_finalize(stmt);
+}
+
+double Database::meta_double(const std::string& key, double fallback) const {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "SELECT value FROM meta WHERE key = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        return fallback;
+    }
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    double result = fallback;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (const unsigned char* v = sqlite3_column_text(stmt, 0)) {
+            try {
+                result = std::stod(reinterpret_cast<const char*>(v));
+            } catch (...) {
+                result = fallback;
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::set_meta_double(const std::string& key, double value) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare INSERT meta");
+    }
+    sqlite3_bind_text(stmt, 1, key.c_str(),                  -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, std::to_string(value).c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step INSERT meta");
     }
     sqlite3_finalize(stmt);
 }

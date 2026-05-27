@@ -725,6 +725,41 @@ TEST_CASE("db: tags survive a legacy DB without node_tags table (migration creat
     std::remove(path.c_str());
 }
 
+TEST_CASE("db: meta_double returns fallback when key is missing") {
+    Database db(":memory:");
+    CHECK(db.meta_double("never-set", -1.0) == doctest::Approx(-1.0));
+    CHECK(db.meta_double("never-set",  0.0) == doctest::Approx( 0.0));
+}
+
+TEST_CASE("db: meta_double roundtrips through set_meta_double") {
+    Database db(":memory:");
+    db.set_meta_double("last_open_ts", 1735689600.5);
+    CHECK(db.meta_double("last_open_ts", 0.0) == doctest::Approx(1735689600.5));
+}
+
+TEST_CASE("db: set_meta_double upserts (second write overwrites)") {
+    Database db(":memory:");
+    db.set_meta_double("k", 1.0);
+    db.set_meta_double("k", 2.0);
+    db.set_meta_double("k", 3.0);
+    CHECK(db.meta_double("k", -1.0) == doctest::Approx(3.0));
+}
+
+TEST_CASE("db: meta survives close + reopen against a real file") {
+    const std::string path = "/tmp/zg_meta_" + std::to_string(::getpid()) + ".db";
+    std::remove(path.c_str());
+
+    {
+        Database db(path);
+        db.set_meta_double("last_open_ts", 9876.5);
+    }
+    {
+        Database db(path);  // fresh connection
+        CHECK(db.meta_double("last_open_ts", 0.0) == doctest::Approx(9876.5));
+    }
+    std::remove(path.c_str());
+}
+
 TEST_CASE("db: update_node_tier with empty string is stored verbatim") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "alpha", ""}}, {});

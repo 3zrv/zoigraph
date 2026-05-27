@@ -64,6 +64,12 @@ public:
     // doesn't exist (no node + no tags).
     void update_node_tags(long long id, const std::vector<std::string>& tags);
 
+    // Generic key-value metadata for project-wide settings (last open
+    // timestamp, etc.). meta_double returns `fallback` if the key is
+    // missing or fails to parse as a double; set_meta_double upserts.
+    double meta_double(const std::string& key, double fallback) const;
+    void   set_meta_double(const std::string& key, double value);
+
     // Updates label/kind/certainty on the single edge identified by
     // (source, target). Silently does nothing if no matching edge exists.
     // No-op for callers passing strings that don't change anything.

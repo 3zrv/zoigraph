@@ -18,6 +18,7 @@
 #include "graph/cluster.h"
 #include "graph/graph_buffer.h"
 #include "graph/picks.h"
+#include "graph/timeline.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "input/escape_wipe.h"
@@ -480,6 +481,8 @@ int main() {
     std::vector<std::size_t>     cluster_ids;
     std::string                  tag_filter;
     std::size_t                  self_idx = SIZE_MAX;  // tier=="self" lookup, SIZE_MAX if absent
+    bool                         timeline_mode  = false;
+    double                       prev_open_ts   = 0.0;  // last_open_ts before this session bumped it
     transforms.reserve(512);
 
     auto open_project = [&](const std::string& name) {
@@ -567,6 +570,17 @@ int main() {
         if (self_idx < positions.size()) {
             physics->set_pin(self_idx, positions[self_idx]);
         }
+
+        // Diff-since-last-open: snapshot the previous last_open_ts (used by
+        // the render to tint new/changed nodes) then bump it to now. Old
+        // projects without a stored value get prev_open_ts = 0, which
+        // suppresses the tints on first viewing.
+        prev_open_ts = db->meta_double("last_open_ts", 0.0);
+        db->set_meta_double("last_open_ts", unix_now());
+
+        // A project switch leaves any prior timeline-mode state behind —
+        // start the new session in force-directed mode.
+        timeline_mode = false;
     };
 
     // Ensure there's at least one project. If projects/ is empty, "default"
@@ -624,6 +638,27 @@ int main() {
         if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
             && positions.size() >= 3) {
             throw_bones(bones, positions, edges, camera, rabbit_rng);
+        }
+
+        // T key toggles timeline mode: every node gets pinned at a
+        // position derived from its first_seen on a horizontal axis;
+        // pressing again unpins everything (except self) so physics
+        // takes over again.
+        if (IsKeyPressed(KEY_T) && !typing && physics && !stored_nodes.empty()) {
+            timeline_mode = !timeline_mode;
+            if (timeline_mode) {
+                std::vector<double> firsts;
+                firsts.reserve(stored_nodes.size());
+                for (const auto& sn : stored_nodes) firsts.push_back(sn.first_seen);
+                const auto layout = zg::graph::compute_timeline_positions(firsts);
+                for (std::size_t i = 0; i < layout.size(); ++i) {
+                    physics->set_pin(i, layout[i]);
+                }
+            } else {
+                for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+                    if (i != self_idx) physics->clear_pin(i);
+                }
+            }
         }
 
         if (rabbit.active) {
@@ -786,6 +821,21 @@ int main() {
                 const auto& tags = stored_nodes[i].tags;
                 if (std::find(tags.begin(), tags.end(), tag_filter) != tags.end()) {
                     DrawSphereWires(positions[i], kNodeRadius * 2.2f, 10, 10, SKYBLUE);
+                }
+            }
+
+            // Diff-since-last-open tints: nodes that appeared or changed
+            // since the previous session get a temporary halo. NEW (created
+            // in this session) trumps CHANGED so the bright color wins on
+            // freshly-created nodes.
+            if (prev_open_ts > 0.0 && i < stored_nodes.size()) {
+                const auto& sn = stored_nodes[i];
+                if (sn.first_seen > prev_open_ts) {
+                    DrawSphereWires(positions[i], kNodeRadius * 1.8f, 10, 10,
+                                    Color{0, 220, 255, 220});  // bright cyan = NEW
+                } else if (sn.last_touched > prev_open_ts) {
+                    DrawSphereWires(positions[i], kNodeRadius * 1.5f, 8, 8,
+                                    Color{255, 220, 80, 180}); // pale yellow = CHANGED
                 }
             }
         }
@@ -1460,6 +1510,7 @@ int main() {
             ImGui::TextDisabled("R KEY              reset view");
             ImGui::TextDisabled("H KEY              rabbit hole");
             ImGui::TextDisabled("B KEY              throw the bones");
+            ImGui::TextDisabled("T KEY              timeline collapse");
             ImGui::TextDisabled("ESC x 3            wipe + exit");
             ImGui::EndTabItem();
         }
