@@ -5,6 +5,8 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <ctime>
@@ -160,6 +162,18 @@ void render_inspector_tab(zg::app::Session& s,
             db->update_node_text(sn.id, sn.title, sn.content, now_ts);
             // The query may now have new hits.
             search_hits = db->search(search_query);
+
+            // Log the edit. Record only lengths -- the operator's content
+            // shouldn't leak into the telemetry log (privacy + bloat).
+            // Co-located with the touch-edge logic below so pin-then-edit
+            // analysis can join on (node_id, ts).
+            nlohmann::json p = {
+                {"node_id",     sn.id},
+                {"title_len",   sn.title.size()},
+                {"content_len", sn.content.size()},
+                {"tier",        sn.tier},
+            };
+            db->log_event("node_edit", sn.id, p.dump());
 
             // Touch-edge: any operator edit on a non-self node should
             // create a record-of-attention from self -> that node.

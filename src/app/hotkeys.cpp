@@ -4,11 +4,14 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#include <nlohmann/json.hpp>
+
 #include <cstddef>
 #include <utility>
 #include <vector>
 
 #include "graph/timeline.h"
+#include "persistence/db.h"
 #include "render/camera.h"
 
 namespace zg::app {
@@ -53,6 +56,15 @@ void handle_hotkeys(Session& s,
     if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
         && positions.size() >= 3) {
         zg::macros::throw_bones(bones, positions, edges, camera, rng);
+        // Only log on a successful throw -- pick_weakly_connected_triple
+        // returns <3 ids when the graph can't supply a meaningful triple,
+        // in which case bones.active stays false and the macro is a no-op.
+        if (bones.active && bones.chosen.size() == 3 && s.db) {
+            nlohmann::json p = {
+                {"chosen", bones.chosen},
+            };
+            s.db->log_event("bones_throw", -1, p.dump());
+        }
     }
 
     if (IsKeyPressed(KEY_T) && !typing && physics && !stored_nodes.empty()) {
