@@ -29,6 +29,7 @@
 #include "macros/bones.h"
 #include "macros/rabbit_hole.h"
 #include "render/camera.h"
+#include "render/composite.h"
 #include "render/draw.h"
 #include "render/imgui_theme.h"
 #include "render/scene.h"
@@ -106,8 +107,9 @@ int main() {
     // composite so the inspector stays crisp.
     RenderTexture2D scene_rt = LoadRenderTexture(kWidth, kHeight);
     Shader crt_shader = LoadShaderFromMemory(nullptr, kCrtFS);
-    const int loc_crt_resolution = GetShaderLocation(crt_shader, "resolution");
-    const int loc_crt_time       = GetShaderLocation(crt_shader, "time");
+    zg::render::CrtShaderLocs crt_locs;
+    crt_locs.resolution = GetShaderLocation(crt_shader, "resolution");
+    crt_locs.time       = GetShaderLocation(crt_shader, "time");
 
     // Multi-project model: each project lives in projects/<name>.db. The
     // legacy single-file zoigraph.db is migrated into projects/default.db
@@ -179,50 +181,10 @@ int main() {
                                   node_mesh, node_material, node_material_dim,
                                   bones, show_grid, dim_filtered, kPhantomTtl);
 
-        // Composite the 3D RT to the back buffer, optionally through the CRT
-        // post-process. RenderTextures store flipped vertically — pass a
-        // negative source height so the rendered image isn't upside down.
         BeginDrawing();
         ClearBackground(BLACK);
-
-        const float scr_w = static_cast<float>(GetScreenWidth());
-        const float scr_h = static_cast<float>(GetScreenHeight());
-        if (post_process) {
-            const Vector2 res{scr_w, scr_h};
-            const float   t = static_cast<float>(GetTime());
-            SetShaderValue(crt_shader, loc_crt_resolution, &res, SHADER_UNIFORM_VEC2);
-            SetShaderValue(crt_shader, loc_crt_time,       &t,   SHADER_UNIFORM_FLOAT);
-            BeginShaderMode(crt_shader);
-        }
-        const Rectangle src{0, 0,
-                            static_cast<float>(scene_rt.texture.width),
-                            -static_cast<float>(scene_rt.texture.height)};
-        const Rectangle dst{0, 0, scr_w, scr_h};
-        DrawTexturePro(scene_rt.texture, src, dst, {0, 0}, 0.0f, WHITE);
-        if (post_process) {
-            EndShaderMode();
-        }
-
-        // Edge labels — drawn AFTER the CRT composite so they stay crisp
-        // and BEFORE ImGui so the inspector can sit on top of them. Skip
-        // labels whose midpoint is behind the camera (GetWorldToScreen
-        // returns nonsense for those).
-        {
-            const Vector3 cam_forward = Vector3Subtract(camera.target, camera.position);
-            for (const auto& e : edges) {
-                if (e.label.empty()) continue;
-                if (e.source >= positions.size() || e.target >= positions.size()) continue;
-                const Vector3 mid     = Vector3Lerp(positions[e.source], positions[e.target], 0.5f);
-                const Vector3 to_mid  = Vector3Subtract(mid, camera.position);
-                if (Vector3DotProduct(to_mid, cam_forward) <= 0.0f) continue;
-                const Vector2 screen = GetWorldToScreen(mid, camera);
-                const int tw = MeasureText(e.label.c_str(), 12);
-                DrawText(e.label.c_str(),
-                         static_cast<int>(screen.x) - tw / 2,
-                         static_cast<int>(screen.y) - 7,
-                         12, GRAY);
-            }
-        }
+        zg::render::composite_scene(scene_rt, crt_shader, crt_locs, post_process);
+        zg::render::draw_edge_labels(session, camera);
 
         rlImGuiBegin();
 
@@ -269,15 +231,7 @@ int main() {
 
         rlImGuiEnd();
 
-        // Triple-escape wipe progress indicator — drawn last so it sits on
-        // top of everything (ImGui included). Big and red so the operator
-        // sees instantly whether their keypresses are landing.
-        const int esc_recent = esc_wipe.count_recent(GetTime(), kWipeWindow);
-        if (esc_recent > 0 && esc_recent < 3) {
-            const char* msg = TextFormat("ESC %d/3", esc_recent);
-            const int   tw  = MeasureText(msg, 36);
-            DrawText(msg, GetScreenWidth() - tw - 24, 24, 36, RED);
-        }
+        zg::render::draw_esc_hud(esc_wipe, kWipeWindow);
 
         EndDrawing();
     }
