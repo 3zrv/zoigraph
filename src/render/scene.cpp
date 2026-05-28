@@ -45,6 +45,10 @@ void draw_scene_3d(const zg::app::Session& s,
     transforms.clear();
     transforms_match.clear();
     for (std::size_t i = 0; i < positions.size(); ++i) {
+        // Soft-deleted nodes vanish from the field. Edges touching them
+        // are also filtered out below so the trace doesn't dangle to
+        // empty space.
+        if (i < stored_nodes.size() && stored_nodes[i].deleted) continue;
         const Matrix m = MatrixTranslate(positions[i].x, positions[i].y, positions[i].z);
         if (dim_active && i < stored_nodes.size()) {
             const auto& tags = stored_nodes[i].tags;
@@ -81,6 +85,10 @@ void draw_scene_3d(const zg::app::Session& s,
     // treated as confirmed.
     for (const auto& e : edges) {
         if (e.source >= positions.size() || e.target >= positions.size()) continue;
+        // Skip edges with either endpoint tombstoned -- otherwise the
+        // line dangles to invisible empty space.
+        if (e.source < stored_nodes.size() && stored_nodes[e.source].deleted) continue;
+        if (e.target < stored_nodes.size() && stored_nodes[e.target].deleted) continue;
         unsigned char alpha = 255;
         if      (e.certainty == "suspected") alpha = 180;
         else if (e.certainty == "hearsay")   alpha = 100;
@@ -94,6 +102,7 @@ void draw_scene_3d(const zg::app::Session& s,
     // (the bulk of the field) so the few tiered ones pop visually.
     // Self gets a bigger, always-visible green halo.
     for (std::size_t i = 0; i < positions.size() && i < stored_nodes.size(); ++i) {
+        if (stored_nodes[i].deleted) continue;
         const auto& tier = stored_nodes[i].tier;
         if (tier == "self") {
             DrawSphereWires(positions[i], kNodeRadius * 2.0f, 12, 12, GREEN);
@@ -187,9 +196,10 @@ void draw_scene_3d(const zg::app::Session& s,
             const Color glow{255, 200, 60, static_cast<unsigned char>(life * 255.0f)};
             DrawSphereWires(ph.position, kPhantomRadius, 6, 8, glow);
 
-            for (long long target_id : ph.connections) {
-                const auto idx = static_cast<std::size_t>(target_id);
-                if (target_id < 0 || idx >= positions.size()) continue;
+            for (const auto& c : ph.connections) {
+                const auto idx = static_cast<std::size_t>(c.target);
+                if (c.target < 0 || idx >= positions.size()) continue;
+                if (idx < stored_nodes.size() && stored_nodes[idx].deleted) continue;
                 draw_jagged_line(ph.position, positions[idx], glow, now, ph.id);
             }
         }

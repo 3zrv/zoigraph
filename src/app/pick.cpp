@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "app/clock.h"
+#include "app/promote.h"
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "render/sizes.h"
@@ -57,25 +58,16 @@ void handle_pick(Session& s,
         const auto& ph = phantoms[phantom_hit];
         const long long new_id   = static_cast<long long>(stored_nodes.size());
         const double promoted_ts = unix_now();
-        zg::persistence::StoredNode promoted{};
-        promoted.id           = new_id;
-        promoted.position     = ph.position;
-        promoted.title        = ph.label;
-        promoted.content      = "";
-        promoted.first_seen   = promoted_ts;
-        promoted.last_touched = promoted_ts;
-        promoted.tier         = "phantom";
-        stored_nodes.push_back(std::move(promoted));
 
-        for (long long target_id : ph.connections) {
-            if (target_id < 0) continue;
-            const auto tidx = static_cast<std::size_t>(target_id);
-            if (tidx >= positions.size()) continue;
-            if (tidx == static_cast<std::size_t>(new_id)) continue;
-            const zg::graph::Edge new_edge{
-                static_cast<std::size_t>(new_id), tidx};
-            edges.push_back(new_edge);
-            physics->enqueue_edge(new_edge);
+        // promote_phantom is the pure-logic version of click-to-pin
+        // (covered by test_promote). Edge dropping rules and the trust-
+        // gradient defaults (node tier + edge certainty = "phantom")
+        // live there; this site just consumes the result.
+        auto promo = promote_phantom(ph, new_id, promoted_ts, positions.size());
+        stored_nodes.push_back(std::move(promo.node));
+        for (const auto& e : promo.edges) {
+            edges.push_back(e);
+            physics->enqueue_edge(e);
         }
 
         phantom_buffer.remove(ph.id);
@@ -96,11 +88,16 @@ void handle_pick(Session& s,
             seen_phantom_spawn.erase(spawn_it);
         }
         if (db) {
+            nlohmann::json conns = nlohmann::json::array();
+            for (const auto& c : ph.connections) {
+                conns.push_back({{"target", c.target}, {"kind", c.kind}});
+            }
             nlohmann::json payload = {
                 {"phantom_id",    ph.id},
                 {"new_node_id",   new_id},
                 {"label",         ph.label},
-                {"connections",   ph.connections},
+                {"content",       ph.content},
+                {"connections",   conns},
                 {"time_to_pin_s", time_to_pin},
                 {"source",        ph.source},
             };
@@ -110,6 +107,8 @@ void handle_pick(Session& s,
         float best_dist = 0.0f;
         int   best_idx  = -1;
         for (std::size_t i = 0; i < positions.size(); ++i) {
+            // Tombstoned nodes aren't rendered and can't be picked.
+            if (i < stored_nodes.size() && stored_nodes[i].deleted) continue;
             const RayCollision hit = GetRayCollisionSphere(
                 ray, positions[i], zg::render::kNodeRadius);
             if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {

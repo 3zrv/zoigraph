@@ -31,15 +31,33 @@ std::optional<Phantom> parse_phantom(std::string_view payload) {
     if (j.contains("label") && j["label"].is_string()) {
         p.label = j["label"].get<std::string>();
     }
+    // Two accepted shapes per entry, picked per-element so a single payload
+    // can mix legacy and new forms:
+    //   - bare integer            -> Connection{target=int, kind=""}
+    //   - {"target": int, "kind": string}  -> full Connection
+    // Anything else in the array (string, null, malformed object) is
+    // silently dropped, matching the rest of the parser's permissive
+    // policy on optional fields.
     if (j.contains("connections") && j["connections"].is_array()) {
         for (const auto& v : j["connections"]) {
             if (v.is_number_integer()) {
-                p.connections.push_back(v.get<long long>());
+                p.connections.push_back(Connection{v.get<long long>(), ""});
+            } else if (v.is_object() && v.contains("target")
+                       && v["target"].is_number_integer()) {
+                Connection c;
+                c.target = v["target"].get<long long>();
+                if (v.contains("kind") && v["kind"].is_string()) {
+                    c.kind = v["kind"].get<std::string>();
+                }
+                p.connections.push_back(std::move(c));
             }
         }
     }
     if (j.contains("source") && j["source"].is_string()) {
         p.source = j["source"].get<std::string>();
+    }
+    if (j.contains("content") && j["content"].is_string()) {
+        p.content = j["content"].get<std::string>();
     }
     p.spawn_time = 0.0;
     return p;

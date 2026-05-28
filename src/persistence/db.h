@@ -20,6 +20,7 @@ struct StoredNode {
     double                   last_touched = 0.0;          // Unix seconds; bumped on edits
     std::string              tier         = "confirmed";  // "confirmed" / "suspected" / "phantom" / "self"
     std::vector<std::string> tags         = {};           // operator-extensible: subject / asset / hostile / ...
+    bool                     deleted      = false;        // soft-delete tombstone; renderer + inspector skip these
 };
 
 // Thin wrapper around a SQLite connection. The schema is the eventual home
