@@ -198,7 +198,11 @@ add_library(zg_telemetry STATIC
 )
 target_include_directories(zg_telemetry PUBLIC src)
 target_link_libraries(zg_telemetry PUBLIC nlohmann_json::nlohmann_json raylib)
-if(NOT WIN32)
+if(WIN32)
+    # Winsock2 (sockets) + Ws2_32 (WSAStartup, WSAPoll, etc.) live in the
+    # ws2_32 import lib. No DLL deployment needed — it's a Windows system lib.
+    target_link_libraries(zg_telemetry PUBLIC ws2_32)
+else()
     target_link_libraries(zg_telemetry PUBLIC pthread)
 endif()
 
