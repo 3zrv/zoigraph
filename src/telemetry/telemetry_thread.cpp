@@ -47,7 +47,13 @@ void TelemetryThread::run() {
     }
     listening_.store(true);
 
-    std::array<char, 4096> buf{};
+    // 1 KiB is comfortably above any well-formed Phantom payload (id + xyz
+    // + ~200-char label + dozens of connection ids ≈ a few hundred bytes).
+    // MSG_TRUNC makes the kernel report the *true* datagram size even when
+    // it had to truncate into our buffer, so an attacker can't sneak a
+    // megabyte datagram past us by hoping the first 1 KiB happens to parse.
+    constexpr std::size_t kMaxPayload = 1024;
+    std::array<char, kMaxPayload> buf{};
     while (running_.load(std::memory_order_relaxed)) {
         pollfd p{sock_fd_, POLLIN, 0};
         // 100ms tick so the worker can notice stop() without buffering blocked.
@@ -55,8 +61,9 @@ void TelemetryThread::run() {
         if (rc <= 0) continue;
         if (!(p.revents & POLLIN)) continue;
 
-        const ssize_t n = ::recv(sock_fd_, buf.data(), buf.size(), 0);
+        const ssize_t n = ::recv(sock_fd_, buf.data(), buf.size(), MSG_TRUNC);
         if (n <= 0) continue;
+        if (static_cast<std::size_t>(n) > buf.size()) continue;  // oversized; drop
 
         auto phantom = parse_phantom(std::string_view(buf.data(), static_cast<std::size_t>(n)));
         if (!phantom) continue;
