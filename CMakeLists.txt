@@ -130,6 +130,7 @@ add_library(zg_app STATIC
     src/app/hotkeys.cpp
     src/app/pick.cpp
     src/app/ask.cpp
+    src/app/promote.cpp
 )
 target_include_directories(zg_app PUBLIC src)
 target_link_libraries(zg_app PUBLIC

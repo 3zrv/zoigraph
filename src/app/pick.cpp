@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "app/clock.h"
+#include "app/promote.h"
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "render/sizes.h"
@@ -57,30 +58,16 @@ void handle_pick(Session& s,
         const auto& ph = phantoms[phantom_hit];
         const long long new_id   = static_cast<long long>(stored_nodes.size());
         const double promoted_ts = unix_now();
-        zg::persistence::StoredNode promoted{};
-        promoted.id           = new_id;
-        promoted.position     = ph.position;
-        promoted.title        = ph.label;
-        promoted.content      = ph.content;
-        promoted.first_seen   = promoted_ts;
-        promoted.last_touched = promoted_ts;
-        promoted.tier         = "phantom";
-        stored_nodes.push_back(std::move(promoted));
 
-        // Edges from a freshly-pinned phantom land at certainty="phantom"
-        // (the lowest tier) -- they came from the model, not the operator,
-        // and the visual fade communicates that until the operator
-        // explicitly promotes them via the edge editor.
-        for (long long target_id : ph.connections) {
-            if (target_id < 0) continue;
-            const auto tidx = static_cast<std::size_t>(target_id);
-            if (tidx >= positions.size()) continue;
-            if (tidx == static_cast<std::size_t>(new_id)) continue;
-            const zg::graph::Edge new_edge{
-                static_cast<std::size_t>(new_id), tidx,
-                /*label=*/"", /*kind=*/"", /*certainty=*/"phantom"};
-            edges.push_back(new_edge);
-            physics->enqueue_edge(new_edge);
+        // promote_phantom is the pure-logic version of click-to-pin
+        // (covered by test_promote). Edge dropping rules and the trust-
+        // gradient defaults (node tier + edge certainty = "phantom")
+        // live there; this site just consumes the result.
+        auto promo = promote_phantom(ph, new_id, promoted_ts, positions.size());
+        stored_nodes.push_back(std::move(promo.node));
+        for (const auto& e : promo.edges) {
+            edges.push_back(e);
+            physics->enqueue_edge(e);
         }
 
         phantom_buffer.remove(ph.id);

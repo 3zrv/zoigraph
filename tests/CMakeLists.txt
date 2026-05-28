@@ -63,3 +63,7 @@ add_test(NAME escape_wipe COMMAND test_escape_wipe)
 add_executable(test_ask test_ask.cpp)
 target_link_libraries(test_ask PRIVATE zg_app doctest::doctest)
 add_test(NAME ask COMMAND test_ask)
+
+add_executable(test_promote test_promote.cpp)
+target_link_libraries(test_promote PRIVATE zg_app doctest::doctest)
+add_test(NAME promote COMMAND test_promote)
