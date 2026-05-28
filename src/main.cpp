@@ -23,6 +23,7 @@
 #include "graph/wikilinks.h"
 #include "app/clock.h"
 #include "app/hotkeys.h"
+#include "app/pick.h"
 #include "app/session.h"
 #include "input/escape_wipe.h"
 #include "macros/bones.h"
@@ -155,10 +156,7 @@ int main() {
     bool                             post_process    = true;
     bool                             dim_filtered    = true;  // dim non-matching nodes when a tag filter is active
     bool                             focus_inspector = false; // set by double-click on a node, consumed by the Inspector tab
-    // Double-click tracker (~350 ms window). Static-like state, but kept here so
-    // the picker block stays self-contained and resets are visible.
-    double                           last_node_click_t   = -100.0;
-    int                              last_node_click_idx = -1;
+    zg::app::DoubleClickState        dbl_click;
     RabbitHole                       rabbit;
     Bones                            bones;
 
@@ -194,87 +192,8 @@ int main() {
         buffer.snapshot(positions);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
-        // Raypick on left-click, but only when ImGui isn't already eating the
-        // mouse. Phantoms get first crack since they're bigger and ephemeral;
-        // hitting one promotes it to a Static Node before the static-pick
-        // pass even runs.
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
-            const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera);
-
-            int    phantom_hit = -1;
-            float  phantom_dist = 0.0f;
-            for (std::size_t i = 0; i < phantoms.size(); ++i) {
-                const RayCollision hit = GetRayCollisionSphere(ray, phantoms[i].position, kPhantomRadius);
-                if (hit.hit && (phantom_hit < 0 || hit.distance < phantom_dist)) {
-                    phantom_dist = hit.distance;
-                    phantom_hit  = static_cast<int>(i);
-                }
-            }
-
-            if (phantom_hit >= 0) {
-                // Promote: halt decay, append a Static Node carrying the
-                // phantom's label as title, materialize any jagged-edge
-                // connections as real graph edges, save to disk, queue
-                // both node and edges into physics, then select. Promoted
-                // node enters the "phantom" tier (visibly distinct from
-                // confirmed Static Nodes).
-                const auto& ph = phantoms[phantom_hit];
-                const long long new_id = static_cast<long long>(stored_nodes.size());
-                const double promoted_ts = unix_now();
-                zg::persistence::StoredNode promoted{};
-                promoted.id           = new_id;
-                promoted.position     = ph.position;
-                promoted.title        = ph.label;
-                promoted.content      = "";
-                promoted.first_seen   = promoted_ts;
-                promoted.last_touched = promoted_ts;
-                promoted.tier         = "phantom";
-                stored_nodes.push_back(std::move(promoted));
-
-                for (long long target_id : ph.connections) {
-                    if (target_id < 0) continue;
-                    const auto tidx = static_cast<std::size_t>(target_id);
-                    if (tidx >= positions.size()) continue;
-                    if (tidx == static_cast<std::size_t>(new_id)) continue;
-                    const zg::graph::Edge new_edge{
-                        static_cast<std::size_t>(new_id), tidx};
-                    edges.push_back(new_edge);
-                    physics->enqueue_edge(new_edge);
-                }
-
-                phantom_buffer.remove(ph.id);
-                db->save_graph(stored_nodes, edges);
-                physics->enqueue_node(ph.position);
-                selected_node = static_cast<int>(new_id);
-            } else {
-                float best_dist = 0.0f;
-                int   best_idx  = -1;
-                for (std::size_t i = 0; i < positions.size(); ++i) {
-                    const RayCollision hit = GetRayCollisionSphere(ray, positions[i], kNodeRadius);
-                    if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {
-                        best_dist = hit.distance;
-                        best_idx  = static_cast<int>(i);
-                    }
-                }
-                selected_node = best_idx;
-            }
-
-            // Double-click on the same node within 350 ms surfaces the
-            // Inspector tab next frame so the operator can dive into the
-            // selection without manually switching tabs. Consume the
-            // tracker on detection so a fast triple-click doesn't fire
-            // twice.
-            if (selected_node >= 0) {
-                const double t = GetTime();
-                if (selected_node == last_node_click_idx && (t - last_node_click_t) < 0.35) {
-                    focus_inspector     = true;
-                    last_node_click_idx = -1;
-                } else {
-                    last_node_click_idx = selected_node;
-                    last_node_click_t   = t;
-                }
-            }
-        }
+        zg::app::handle_pick(session, camera, phantoms, phantom_buffer,
+                             dbl_click, focus_inspector);
 
         // When the operator has set a tag filter AND wants dimming, split
         // the per-frame transform list in two and issue two instanced draws

@@ -114,6 +114,7 @@ target_link_libraries(zg_physics PUBLIC raylib)
 add_library(zg_app STATIC
     src/app/session.cpp
     src/app/hotkeys.cpp
+    src/app/pick.cpp
 )
 target_include_directories(zg_app PUBLIC src)
 target_link_libraries(zg_app PUBLIC
