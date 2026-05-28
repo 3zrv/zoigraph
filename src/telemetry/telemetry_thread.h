@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <thread>
 
 #include "telemetry/phantom_buffer.h"
@@ -37,7 +38,11 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> listening_{false};
     std::thread       worker_;
-    int               sock_fd_ = -1;
+    // Stored as intptr_t so the same field fits a POSIX int file descriptor
+    // and a Windows SOCKET handle (which is uintptr_t under the hood). The
+    // .cpp casts to the platform-specific type at the boundary. -1 is the
+    // not-open sentinel for both.
+    std::intptr_t     sock_fd_ = -1;
 };
 
 }  // namespace zg::telemetry
