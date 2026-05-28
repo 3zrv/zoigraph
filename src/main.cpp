@@ -22,6 +22,7 @@
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "app/clock.h"
+#include "app/hotkeys.h"
 #include "app/session.h"
 #include "input/escape_wipe.h"
 #include "macros/bones.h"
@@ -180,70 +181,14 @@ int main() {
     constexpr double                 kWipeWindow = 1.5;
 
     while (!WindowShouldClose() && !requested_exit) {
-        // Triple-Escape wipe — three ESC presses within kWipeWindow seconds
-        // triggers a clean shutdown. (When SQLCipher lands this is where
-        // the key buffer gets zeroed before the DB closes.)
-        if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), kWipeWindow)) {
-            requested_exit = true;
-        }
-
         if (IsWindowResized()) {
             UnloadRenderTexture(scene_rt);
             scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
         }
 
-        // H key triggers the Rabbit Hole macro from the currently selected
-        // node. Ignored if nothing is selected or a macro is already running.
-        const bool typing = ImGui::GetIO().WantTextInput;
-        if (IsKeyPressed(KEY_H) && !typing && selected_node >= 0
-            && static_cast<std::size_t>(selected_node) < positions.size()
-            && !rabbit.active && !bones.active) {
-            auto path = pick_rabbit_path(static_cast<std::size_t>(selected_node),
-                                          edges, rabbit_rng, positions.size());
-            if (path.size() >= 2) {
-                rabbit.active        = true;
-                rabbit.path          = std::move(path);
-                rabbit.segment       = 0;
-                rabbit.elapsed       = 0.0f;
-                rabbit.camera_offset = Vector3Subtract(camera.position, camera.target);
-            }
-        }
+        zg::app::handle_hotkeys(session, camera, esc_wipe, kWipeWindow,
+                                rabbit, bones, rabbit_rng, requested_exit);
 
-        // B key throws the bones — three weakly-connected nodes, smooth fly
-        // to frame all three, scratch panel asks what connects them.
-        if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
-            && positions.size() >= 3) {
-            throw_bones(bones, positions, edges, camera, rabbit_rng);
-        }
-
-        // T key toggles timeline mode: every node gets pinned at a
-        // position derived from its first_seen on a horizontal axis;
-        // pressing again unpins everything (except self) so physics
-        // takes over again.
-        if (IsKeyPressed(KEY_T) && !typing && physics && !stored_nodes.empty()) {
-            timeline_mode = !timeline_mode;
-            if (timeline_mode) {
-                std::vector<double> firsts;
-                firsts.reserve(stored_nodes.size());
-                for (const auto& sn : stored_nodes) firsts.push_back(sn.first_seen);
-                const auto layout = zg::graph::compute_timeline_positions(firsts);
-                for (std::size_t i = 0; i < layout.size(); ++i) {
-                    physics->set_pin(i, layout[i]);
-                }
-            } else {
-                for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
-                    if (i != self_idx) physics->clear_pin(i);
-                }
-            }
-        }
-
-        if (rabbit.active) {
-            update_rabbit_hole(rabbit, camera, positions, selected_node, GetFrameTime());
-        } else if (bones.active) {
-            update_bones(bones, camera, GetFrameTime());
-        } else {
-            update_orbit_camera(camera);
-        }
         // Positions-only snapshot — edges are owned by main so the buffer
         // doesn't clobber operator edits to label / kind / certainty.
         buffer.snapshot(positions);
