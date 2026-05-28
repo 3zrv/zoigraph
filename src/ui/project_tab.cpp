@@ -21,6 +21,7 @@ void render_project_tab(zg::app::Session& s,
     auto& stored_nodes    = s.stored_nodes;
     auto& edges           = s.edges;
     auto& cluster_ids     = s.cluster_ids;
+    auto& tag_filter      = s.tag_filter;
 
     ImGui::Text("active: %s", current_project.c_str());
     {
@@ -94,6 +95,37 @@ void render_project_tab(zg::app::Session& s,
             if (ImGui::SmallButton("cancel")) delete_armed = false;
         }
         if (only_one) ImGui::EndDisabled();
+    }
+
+    ImGui::Separator();
+
+    // ---- tag filter -------------------------------------------------
+    // Collect the unique set of tags across all nodes and expose them as
+    // a combo. Selecting one highlights matching nodes in the 3D view;
+    // "(all)" clears the filter.
+    {
+        std::vector<std::string> unique_tags = {"(all)"};
+        std::set<std::string>    seen;
+        for (const auto& sn : stored_nodes) {
+            for (const auto& t : sn.tags) {
+                if (seen.insert(t).second) unique_tags.push_back(t);
+            }
+        }
+        int filter_idx = 0;
+        for (std::size_t k = 1; k < unique_tags.size(); ++k) {
+            if (unique_tags[k] == tag_filter) {
+                filter_idx = static_cast<int>(k);
+                break;
+            }
+        }
+        std::vector<const char*> filter_ptrs;
+        filter_ptrs.reserve(unique_tags.size());
+        for (const auto& tag : unique_tags) filter_ptrs.push_back(tag.c_str());
+        if (ImGui::Combo("filter by tag", &filter_idx,
+                         filter_ptrs.data(),
+                         static_cast<int>(filter_ptrs.size()))) {
+            tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
+        }
     }
 
     ImGui::Separator();

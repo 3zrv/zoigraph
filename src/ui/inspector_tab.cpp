@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <ctime>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -34,7 +33,6 @@ void render_inspector_tab(zg::app::Session& s,
     auto& selected_node = s.selected_node;
     auto& search_query  = s.search_query;
     auto& search_hits   = s.search_hits;
-    auto& tag_filter    = s.tag_filter;
 
     ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
     ImGui::Text("edges    %d", static_cast<int>(edges.size()));
@@ -295,36 +293,6 @@ void render_inspector_tab(zg::app::Session& s,
     }
     ImGui::Separator();
 
-    // ---- view filters ---------------------------------------------
-    // Tag filter: collect the unique set of tags across all nodes and
-    // expose them as a combo. Selecting one highlights matching nodes;
-    // "(all)" clears the filter.
-    {
-        std::vector<std::string> unique_tags = {"(all)"};
-        std::set<std::string>    seen;
-        for (const auto& sn : stored_nodes) {
-            for (const auto& t : sn.tags) {
-                if (seen.insert(t).second) unique_tags.push_back(t);
-            }
-        }
-        int filter_idx = 0;
-        for (std::size_t k = 1; k < unique_tags.size(); ++k) {
-            if (unique_tags[k] == tag_filter) {
-                filter_idx = static_cast<int>(k);
-                break;
-            }
-        }
-        std::vector<const char*> filter_ptrs;
-        filter_ptrs.reserve(unique_tags.size());
-        for (const auto& s : unique_tags) filter_ptrs.push_back(s.c_str());
-        if (ImGui::Combo("filter by tag", &filter_idx,
-                         filter_ptrs.data(),
-                         static_cast<int>(filter_ptrs.size()))) {
-            tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
-        }
-    }
-
-    ImGui::Separator();
     ImGui::Checkbox("show grid", &show_grid);
     ImGui::Checkbox("CRT post-process", &post_process);
     bool bh = physics->use_barnes_hut();
