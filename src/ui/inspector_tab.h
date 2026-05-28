@@ -17,16 +17,12 @@ namespace zg::ui {
 //   - selected node editor (tier / tags / timestamps / title / content,
 //     touch-edges + wikilinks-on-edit, save-to-disk)
 //   - incident edges editor (label / kind / certainty)
-//   - view filters (tag combo, auto-cluster, show_grid, CRT, Barnes-Hut)
 //
-// Mutates session.{stored_nodes, edges, positions, selected_node, search_*,
-// tag_filter, cluster_ids} as the operator clicks; also mutates camera
-// when the search box jumps to a hit, and the two view bools.
+// Mutates session.{stored_nodes, edges, selected_node, search_*} as the
+// operator clicks; also mutates camera when the search box jumps to a hit.
 void render_inspector_tab(zg::app::Session& session,
                           Camera3D& camera,
                           const std::vector<zg::telemetry::Phantom>& phantoms,
-                          const zg::telemetry::TelemetryThread& telemetry,
-                          bool& show_grid,
-                          bool& post_process);
+                          const zg::telemetry::TelemetryThread& telemetry);
 
 }  // namespace zg::ui

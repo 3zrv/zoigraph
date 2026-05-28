@@ -536,12 +536,12 @@ int main() {
 
         if (ImGui::BeginTabBar("zg_tabs")) {
             if (ImGui::BeginTabItem("Project")) {
-                zg::ui::render_project_tab(session, kProjectsDir, open_project, dim_filtered);
+                zg::ui::render_project_tab(session, kProjectsDir, open_project,
+                                           dim_filtered, show_grid, post_process);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Inspector")) {
-                zg::ui::render_inspector_tab(session, camera, phantoms, telemetry,
-                                             show_grid, post_process);
+                zg::ui::render_inspector_tab(session, camera, phantoms, telemetry);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Toolbar")) {

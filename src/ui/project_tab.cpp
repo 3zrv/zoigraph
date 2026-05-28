@@ -17,7 +17,9 @@ namespace zg::ui {
 void render_project_tab(zg::app::Session& s,
                         const std::filesystem::path& projects_dir,
                         const std::function<void(const std::string&)>& open_project,
-                        bool& dim_filtered) {
+                        bool& dim_filtered,
+                        bool& show_grid,
+                        bool& post_process) {
     auto& current_project = s.current_project;
     auto& stored_nodes    = s.stored_nodes;
     auto& edges           = s.edges;
@@ -131,6 +133,10 @@ void render_project_tab(zg::app::Session& s,
         // out otherwise so the operator knows the toggle is dormant.
         if (tag_filter.empty()) ImGui::BeginDisabled();
         ImGui::Checkbox("dim non-matching nodes", &dim_filtered);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("when a tag filter is active, render non-matching\n"
+                              "nodes in a dimmer red so the matching ones pop.");
+        }
         if (tag_filter.empty()) ImGui::EndDisabled();
     }
 
@@ -152,6 +158,32 @@ void render_project_tab(zg::app::Session& s,
         std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
         ImGui::TextDisabled("%zu clusters across %zu nodes",
                             unique_clusters.size(), cluster_ids.size());
+    }
+
+    ImGui::Separator();
+
+    // ---- view flags -------------------------------------------------
+    ImGui::Checkbox("show grid", &show_grid);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("draw the reference ground plane (40x40 raylib grid).\n"
+                          "purely visual; doesn't affect physics or selection.");
+    }
+    ImGui::Checkbox("CRT post-process", &post_process);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("composite the 3D scene through the CRT shader:\n"
+                          "chromatic aberration, scrolling scanlines, vignette.\n"
+                          "turn off if your GPU struggles or you want crisp pixels.");
+    }
+    if (s.physics) {
+        bool bh = s.physics->use_barnes_hut();
+        if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
+            s.physics->set_use_barnes_hut(bh);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("approximate repulsion with an octree (O(N log N))\n"
+                              "instead of all-pairs (O(N^2)). Cheaper at large N,\n"
+                              "slightly less accurate. Spring forces are unchanged.");
+        }
     }
 }
 

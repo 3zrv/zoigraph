@@ -21,9 +21,7 @@ namespace zg::ui {
 void render_inspector_tab(zg::app::Session& s,
                           Camera3D& camera,
                           const std::vector<zg::telemetry::Phantom>& phantoms,
-                          const zg::telemetry::TelemetryThread& telemetry,
-                          bool& show_grid,
-                          bool& post_process) {
+                          const zg::telemetry::TelemetryThread& telemetry) {
     auto& db            = s.db;
     auto& physics       = s.physics;
     auto& stored_nodes  = s.stored_nodes;
@@ -291,15 +289,6 @@ void render_inspector_tab(zg::app::Session& s,
         ImGui::TextDisabled("selected: (none)");
         ImGui::TextDisabled("(left-click a node)");
     }
-    ImGui::Separator();
-
-    ImGui::Checkbox("show grid", &show_grid);
-    ImGui::Checkbox("CRT post-process", &post_process);
-    bool bh = physics->use_barnes_hut();
-    if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
-        physics->set_use_barnes_hut(bh);
-    }
-    ImGui::Separator();
 }
 
 }  // namespace zg::ui
