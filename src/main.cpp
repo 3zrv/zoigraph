@@ -100,6 +100,12 @@ int main() {
     Material node_material = LoadMaterialDefault();
     node_material.shader = instancing_shader;
     node_material.maps[MATERIAL_MAP_DIFFUSE].color = RED;
+    // Companion material for tag-filter dimming: same shader, much darker
+    // diffuse so non-matching bodies fade into the background without
+    // disappearing entirely (still useful as context for the matches).
+    Material node_material_dim = LoadMaterialDefault();
+    node_material_dim.shader = instancing_shader;
+    node_material_dim.maps[MATERIAL_MAP_DIFFUSE].color = Color{40, 8, 10, 255};
 
     // CRT post-process pipeline: render the 3D scene into a texture, then
     // draw it back through the CRT shader. ImGui is layered on top of the
@@ -146,6 +152,7 @@ int main() {
     std::vector<zg::telemetry::Phantom> phantoms;
     bool                             show_grid     = true;
     bool                             post_process  = true;
+    bool                             dim_filtered  = true;  // dim non-matching nodes when a tag filter is active
     RabbitHole                       rabbit;
     Bones                            bones;
 
@@ -303,9 +310,27 @@ int main() {
             }
         }
 
+        // When the operator has set a tag filter AND wants dimming, split
+        // the per-frame transform list in two and issue two instanced draws
+        // (dim material for non-matching, bright for matching) so the
+        // matched subset visually pops out of the field. Otherwise one
+        // batch with the bright material — same code path as before.
+        const bool dim_active = dim_filtered && !tag_filter.empty();
         transforms.clear();
-        for (const auto& p : positions) {
-            transforms.push_back(MatrixTranslate(p.x, p.y, p.z));
+        static std::vector<Matrix> transforms_match;
+        transforms_match.clear();
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            const Matrix m = MatrixTranslate(positions[i].x, positions[i].y, positions[i].z);
+            if (dim_active && i < stored_nodes.size()) {
+                const auto& tags = stored_nodes[i].tags;
+                if (std::find(tags.begin(), tags.end(), tag_filter) != tags.end()) {
+                    transforms_match.push_back(m);
+                } else {
+                    transforms.push_back(m);
+                }
+            } else {
+                transforms.push_back(m);
+            }
         }
 
         // 3D pass renders into the off-screen RT so the CRT shader can post-
@@ -317,9 +342,15 @@ int main() {
         if (show_grid) DrawGrid(40, 5.0f);
 
         if (!transforms.empty()) {
-            DrawMeshInstanced(node_mesh, node_material,
+            DrawMeshInstanced(node_mesh,
+                              dim_active ? node_material_dim : node_material,
                               transforms.data(),
                               static_cast<int>(transforms.size()));
+        }
+        if (dim_active && !transforms_match.empty()) {
+            DrawMeshInstanced(node_mesh, node_material,
+                              transforms_match.data(),
+                              static_cast<int>(transforms_match.size()));
         }
 
         // Edges with alpha keyed to certainty: confirmed/suspected/hearsay/
@@ -505,7 +536,7 @@ int main() {
 
         if (ImGui::BeginTabBar("zg_tabs")) {
             if (ImGui::BeginTabItem("Project")) {
-                zg::ui::render_project_tab(session, kProjectsDir, open_project);
+                zg::ui::render_project_tab(session, kProjectsDir, open_project, dim_filtered);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Inspector")) {

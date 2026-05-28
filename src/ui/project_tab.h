@@ -19,6 +19,7 @@ namespace zg::ui {
 // rabbit panel resets in a lambda and passes it in here.
 void render_project_tab(zg::app::Session& session,
                         const std::filesystem::path& projects_dir,
-                        const std::function<void(const std::string&)>& open_project);
+                        const std::function<void(const std::string&)>& open_project,
+                        bool& dim_filtered);
 
 }  // namespace zg::ui

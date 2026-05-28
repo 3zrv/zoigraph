@@ -16,7 +16,8 @@ namespace zg::ui {
 
 void render_project_tab(zg::app::Session& s,
                         const std::filesystem::path& projects_dir,
-                        const std::function<void(const std::string&)>& open_project) {
+                        const std::function<void(const std::string&)>& open_project,
+                        bool& dim_filtered) {
     auto& current_project = s.current_project;
     auto& stored_nodes    = s.stored_nodes;
     auto& edges           = s.edges;
@@ -126,6 +127,11 @@ void render_project_tab(zg::app::Session& s,
                          static_cast<int>(filter_ptrs.size()))) {
             tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
         }
+        // Dimming only matters when a filter is active; gray the checkbox
+        // out otherwise so the operator knows the toggle is dormant.
+        if (tag_filter.empty()) ImGui::BeginDisabled();
+        ImGui::Checkbox("dim non-matching nodes", &dim_filtered);
+        if (tag_filter.empty()) ImGui::EndDisabled();
     }
 
     ImGui::Separator();
