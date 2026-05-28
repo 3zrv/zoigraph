@@ -8,12 +8,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <ctime>
-#include <set>
 #include <string>
 #include <vector>
 
 #include "app/clock.h"
-#include "graph/cluster.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "persistence/db.h"
@@ -23,9 +21,7 @@ namespace zg::ui {
 void render_inspector_tab(zg::app::Session& s,
                           Camera3D& camera,
                           const std::vector<zg::telemetry::Phantom>& phantoms,
-                          const zg::telemetry::TelemetryThread& telemetry,
-                          bool& show_grid,
-                          bool& post_process) {
+                          const zg::telemetry::TelemetryThread& telemetry) {
     auto& db            = s.db;
     auto& physics       = s.physics;
     auto& stored_nodes  = s.stored_nodes;
@@ -35,8 +31,6 @@ void render_inspector_tab(zg::app::Session& s,
     auto& selected_node = s.selected_node;
     auto& search_query  = s.search_query;
     auto& search_hits   = s.search_hits;
-    auto& tag_filter    = s.tag_filter;
-    auto& cluster_ids   = s.cluster_ids;
 
     ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
     ImGui::Text("edges    %d", static_cast<int>(edges.size()));
@@ -295,61 +289,6 @@ void render_inspector_tab(zg::app::Session& s,
         ImGui::TextDisabled("selected: (none)");
         ImGui::TextDisabled("(left-click a node)");
     }
-    ImGui::Separator();
-
-    // ---- view filters ---------------------------------------------
-    // Tag filter: collect the unique set of tags across all nodes and
-    // expose them as a combo. Selecting one highlights matching nodes;
-    // "(all)" clears the filter.
-    {
-        std::vector<std::string> unique_tags = {"(all)"};
-        std::set<std::string>    seen;
-        for (const auto& sn : stored_nodes) {
-            for (const auto& t : sn.tags) {
-                if (seen.insert(t).second) unique_tags.push_back(t);
-            }
-        }
-        int filter_idx = 0;
-        for (std::size_t k = 1; k < unique_tags.size(); ++k) {
-            if (unique_tags[k] == tag_filter) {
-                filter_idx = static_cast<int>(k);
-                break;
-            }
-        }
-        std::vector<const char*> filter_ptrs;
-        filter_ptrs.reserve(unique_tags.size());
-        for (const auto& s : unique_tags) filter_ptrs.push_back(s.c_str());
-        if (ImGui::Combo("filter by tag", &filter_idx,
-                         filter_ptrs.data(),
-                         static_cast<int>(filter_ptrs.size()))) {
-            tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
-        }
-    }
-
-    // Auto-cluster: button + clear button.  cluster_ids is the source of
-    // truth; populated on demand, displayed by the cluster halo above.
-    if (ImGui::Button("auto-cluster")) {
-        cluster_ids = zg::graph::label_propagation(
-            stored_nodes.size(), edges, /*max_iters=*/100);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("clear clusters")) {
-        cluster_ids.clear();
-    }
-    if (!cluster_ids.empty()) {
-        std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
-        ImGui::TextDisabled("%zu clusters across %zu nodes",
-                            unique_clusters.size(), cluster_ids.size());
-    }
-
-    ImGui::Separator();
-    ImGui::Checkbox("show grid", &show_grid);
-    ImGui::Checkbox("CRT post-process", &post_process);
-    bool bh = physics->use_barnes_hut();
-    if (ImGui::Checkbox("Barnes-Hut physics", &bh)) {
-        physics->set_use_barnes_hut(bh);
-    }
-    ImGui::Separator();
 }
 
 }  // namespace zg::ui

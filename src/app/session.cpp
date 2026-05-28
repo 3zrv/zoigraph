@@ -1,7 +1,5 @@
 #include "app/session.h"
 
-#include <iterator>
-
 #include "app/clock.h"
 #include "persistence/project_store.h"
 #include "persistence/seed.h"
@@ -46,24 +44,11 @@ void open_project(Session& s,
         initial_positions.reserve(s.stored_nodes.size());
         for (const auto& sn : s.stored_nodes) initial_positions.push_back(sn.position);
     } else {
-        // Fresh project: named seed + 300-node random bulk with content.
-        const double now_ts = unix_now();
-        auto seed = zg::persistence::make_initial_graph(now_ts);
-        auto fill = zg::persistence::make_random_fill(
-            /*node_count=*/300,
-            /*edge_count=*/200,
-            /*start_id=*/static_cast<long long>(seed.nodes.size()),
-            /*now_unix=*/now_ts,
-            /*spread=*/25.0f,
-            /*rng_seed=*/42,
-            /*with_data=*/true);
+        // Fresh project: just the three named seed nodes (self/alice/bob).
+        // No random bulk fill — operator grows the graph by hand.
+        auto seed = zg::persistence::make_initial_graph(unix_now());
         s.stored_nodes = std::move(seed.nodes);
-        s.stored_nodes.insert(s.stored_nodes.end(),
-                              std::make_move_iterator(fill.nodes.begin()),
-                              std::make_move_iterator(fill.nodes.end()));
-        initial_edges = std::move(seed.edges);
-        initial_edges.insert(initial_edges.end(),
-                             fill.edges.begin(), fill.edges.end());
+        initial_edges  = std::move(seed.edges);
         initial_positions.reserve(s.stored_nodes.size());
         for (const auto& sn : s.stored_nodes) initial_positions.push_back(sn.position);
     }

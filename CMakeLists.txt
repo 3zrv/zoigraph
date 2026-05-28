@@ -110,10 +110,16 @@ add_library(zg_physics STATIC
 target_include_directories(zg_physics PUBLIC src)
 target_link_libraries(zg_physics PUBLIC raylib)
 
-# ---- app (per-project session state + open_project) ------------------------
-add_library(zg_app STATIC src/app/session.cpp)
+# ---- app (per-project session state + open_project + render-loop glue) -----
+add_library(zg_app STATIC
+    src/app/session.cpp
+    src/app/hotkeys.cpp
+    src/app/pick.cpp
+)
 target_include_directories(zg_app PUBLIC src)
-target_link_libraries(zg_app PUBLIC zg_persistence zg_physics_thread zg_graph zg_telemetry)
+target_link_libraries(zg_app PUBLIC
+    zg_persistence zg_physics_thread zg_graph zg_telemetry
+    zg_input zg_macros zg_render imgui)
 
 # ---- ui (ImGui tab renderers) ----------------------------------------------
 add_library(zg_ui STATIC
@@ -121,9 +127,10 @@ add_library(zg_ui STATIC
     src/ui/inspector_tab.cpp
     src/ui/help_tab.cpp
     src/ui/bones_panel.cpp
+    src/ui/project_tab.cpp
 )
 target_include_directories(zg_ui PUBLIC src)
-target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry zg_macros imgui raylib)
+target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry zg_macros zg_graph zg_persistence imgui raylib)
 
 # ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
 add_library(zg_macros STATIC
@@ -133,14 +140,21 @@ add_library(zg_macros STATIC
 target_include_directories(zg_macros PUBLIC src)
 target_link_libraries(zg_macros PUBLIC zg_graph raylib)
 
-# ---- render (shaders + imgui theme + camera + small draw helpers) ----------
+# ---- render (shaders + imgui theme + camera + scene + composite) -----------
 add_library(zg_render STATIC
     src/render/imgui_theme.cpp
     src/render/camera.cpp
     src/render/draw.cpp
+    src/render/scene.cpp
+    src/render/composite.cpp
 )
 target_include_directories(zg_render PUBLIC src)
-target_link_libraries(zg_render PUBLIC imgui raylib)
+# scene + composite read from Session, Bones, EscapeWipe — pull in the struct
+# definitions via zg_graph / zg_macros / zg_input. zg_app would be the natural
+# umbrella but zg_app already links zg_render (hotkeys calls update_orbit_camera),
+# so depending on zg_app here would loop. The leaf libs are enough — we never
+# call into zg_app code.
+target_link_libraries(zg_render PUBLIC imgui raylib zg_graph zg_macros zg_input)
 
 # ---- input (pure key/event state machines, testable without raylib) --------
 add_library(zg_input STATIC src/input/escape_wipe.cpp)
