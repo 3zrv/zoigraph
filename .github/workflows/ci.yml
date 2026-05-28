@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"] # release.yml owns tag pushes
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Raylib pulls in X11 + GL dev headers at build time on Linux. macOS
+      # and Windows runners already have what raylib needs (Cocoa/OpenGL,
+      # GDI/OpenGL respectively) preinstalled.
+      - name: install linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxi-dev libxcursor-dev \
+            libwayland-dev libxkbcommon-dev
+
+      # FetchContent downloads raylib (+ glfw), imgui, rlImGui, sqlite, json,
+      # doctest on every fresh build — together a few hundred MB. Cache the
+      # whole _deps tree keyed on CMakeLists.txt so we only re-fetch when
+      # a dep version actually moves.
+      - name: cache fetchcontent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: build
+        run: cmake --build build --config Release --parallel
+
+      - name: test
+        working-directory: build
+        run: ctest --output-on-failure --build-config Release

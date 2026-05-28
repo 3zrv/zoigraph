@@ -1,0 +1,114 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # needed to create the GitHub Release + attach assets
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: zoigraph-linux-x86_64
+            archive_ext: tar.gz
+            binary: zoigraph
+          - os: macos-latest
+            asset_name: zoigraph-macos-arm64
+            archive_ext: tar.gz
+            binary: zoigraph
+          - os: windows-latest
+            asset_name: zoigraph-windows-x86_64
+            archive_ext: zip
+            binary: zoigraph.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxi-dev libxcursor-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - name: cache fetchcontent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: build
+        run: cmake --build build --config Release --parallel
+
+      # Run ctest before shipping so a broken build never reaches a tag.
+      - name: test
+        working-directory: build
+        run: ctest --output-on-failure --build-config Release
+
+      # Multi-config generators (MSVC) put the binary in build/Release/.
+      # Single-config (Make/Ninja) put it in build/. Stage into a known
+      # path before archiving so the rest of the steps look the same.
+      - name: stage binary
+        shell: bash
+        run: |
+          mkdir -p stage/${{ matrix.asset_name }}
+          if [ -f "build/Release/${{ matrix.binary }}" ]; then
+            cp "build/Release/${{ matrix.binary }}" "stage/${{ matrix.asset_name }}/"
+          else
+            cp "build/${{ matrix.binary }}" "stage/${{ matrix.asset_name }}/"
+          fi
+          # Strip release symbols on POSIX to shrink the binary by half-ish.
+          # Windows MSVC builds don't embed symbols in the .exe by default.
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            strip "stage/${{ matrix.asset_name }}/${{ matrix.binary }}" || true
+          fi
+
+      - name: archive (tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        working-directory: stage
+        run: tar -czf "${{ matrix.asset_name }}.tar.gz" "${{ matrix.asset_name }}"
+
+      - name: archive (zip)
+        if: matrix.archive_ext == 'zip'
+        working-directory: stage
+        shell: pwsh
+        run: Compress-Archive -Path "${{ matrix.asset_name }}" -DestinationPath "${{ matrix.asset_name }}.zip"
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: stage/${{ matrix.asset_name }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: collect artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: create github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
