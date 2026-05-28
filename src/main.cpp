@@ -33,6 +33,7 @@
 #include "ui/bones_panel.h"
 #include "ui/help_tab.h"
 #include "ui/inspector_tab.h"
+#include "ui/project_tab.h"
 #include "ui/toolbar_tab.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
@@ -142,16 +143,22 @@ int main() {
     std::vector<Matrix> transforms;
     transforms.reserve(512);
 
-    auto open_project = [&](const std::string& name) {
-        zg::app::open_project(session, name, kProjectsDir, buffer, phantom_buffer);
-    };
-    open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
-
     std::vector<zg::telemetry::Phantom> phantoms;
     bool                             show_grid     = true;
     bool                             post_process  = true;
     RabbitHole                       rabbit;
     Bones                            bones;
+
+    // The lambda captures bones / rabbit so a project switch always closes
+    // the bones scratch panel and cancels any in-flight rabbit hole. The
+    // Session-owned resets (selected_node, search_*, etc.) happen inside
+    // zg::app::open_project itself.
+    auto open_project = [&](const std::string& name) {
+        bones.panel_open = false;
+        rabbit.active    = false;
+        zg::app::open_project(session, name, kProjectsDir, buffer, phantom_buffer);
+    };
+    open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
     std::mt19937                     rabbit_rng(std::random_device{}());
     zg::input::EscapeWipe            esc_wipe;
     bool                             requested_exit = false;
@@ -496,114 +503,25 @@ int main() {
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
 
-        // ---- PROJECT switcher ------------------------------------------
-        ImGui::TextDisabled("// PROJECT //");
-        ImGui::Text("active: %s", current_project.c_str());
-        {
-            const auto names = zg::persistence::list_projects(kProjectsDir);
-            int active_idx = -1;
-            std::vector<const char*> ptrs;
-            ptrs.reserve(names.size());
-            for (std::size_t i = 0; i < names.size(); ++i) {
-                ptrs.push_back(names[i].c_str());
-                if (names[i] == current_project) active_idx = static_cast<int>(i);
-            }
-            if (!ptrs.empty()) {
-                if (ImGui::Combo("switch", &active_idx, ptrs.data(),
-                                 static_cast<int>(ptrs.size())) &&
-                    active_idx >= 0 &&
-                    names[static_cast<std::size_t>(active_idx)] != current_project) {
-                    selected_node = -1;
-                    search_query.clear();
-                    search_hits.clear();
-                    bones.panel_open = false;
-                    rabbit.active = false;
-                    open_project(names[static_cast<std::size_t>(active_idx)]);
-                }
-            }
-
-            static std::string new_name;
-            static std::string create_msg;
-            const bool submitted = ImGui::InputText("new", &new_name,
-                                                    ImGuiInputTextFlags_EnterReturnsTrue);
-            if (ImGui::IsItemEdited()) create_msg.clear();
-            ImGui::SameLine();
-            const bool clicked = ImGui::SmallButton("create");
-            if (submitted || clicked) {
-                if (new_name.empty()) {
-                    create_msg = "name is empty";
-                } else if (!zg::persistence::is_valid_project_name(new_name)) {
-                    create_msg = "name must be 1-64 chars: [A-Za-z0-9_-]";
-                } else if (std::filesystem::exists(
-                               zg::persistence::project_path(kProjectsDir, new_name))) {
-                    create_msg = "project already exists";
-                } else {
-                    selected_node = -1;
-                    search_query.clear();
-                    search_hits.clear();
-                    bones.panel_open = false;
-                    rabbit.active = false;
-                    const std::string to_open = new_name;
-                    new_name.clear();
-                    create_msg.clear();
-                    open_project(to_open);
-                }
-            }
-            if (!create_msg.empty()) {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s", create_msg.c_str());
-            }
-
-            // Delete-current arming. First click sets the arm flag; second
-            // confirms. Disables itself if there's only one project left
-            // (always need at least one to be active).
-            static bool delete_armed = false;
-            const bool only_one = names.size() <= 1;
-            if (only_one) ImGui::BeginDisabled();
-            if (!delete_armed) {
-                if (ImGui::SmallButton("delete current...")) delete_armed = true;
-            } else {
-                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("yes, delete")) {
-                    const std::string victim = current_project;
-                    std::string fallback;
-                    for (const auto& n : names) {
-                        if (n != victim) { fallback = n; break; }
-                    }
-                    if (!fallback.empty()) {
-                        selected_node = -1;
-                        search_query.clear();
-                        search_hits.clear();
-                        bones.panel_open = false;
-                        rabbit.active = false;
-                        open_project(fallback);
-                        zg::persistence::delete_project(kProjectsDir, victim);
-                    }
-                    delete_armed = false;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("cancel")) delete_armed = false;
-            }
-            if (only_one) ImGui::EndDisabled();
-        }
-        ImGui::Separator();
-        // ---- /PROJECT --------------------------------------------------
-
         if (ImGui::BeginTabBar("zg_tabs")) {
-        if (ImGui::BeginTabItem("Inspector")) {
-            zg::ui::render_inspector_tab(session, camera, phantoms, telemetry,
-                                         show_grid, post_process);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Toolbar")) {
-            zg::ui::render_toolbar_tab(session, phantom_buffer);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Help")) {
-            zg::ui::render_help_tab();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+            if (ImGui::BeginTabItem("Project")) {
+                zg::ui::render_project_tab(session, kProjectsDir, open_project);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Inspector")) {
+                zg::ui::render_inspector_tab(session, camera, phantoms, telemetry,
+                                             show_grid, post_process);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Toolbar")) {
+                zg::ui::render_toolbar_tab(session, phantom_buffer);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Help")) {
+                zg::ui::render_help_tab();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
         }
         ImGui::End();
 

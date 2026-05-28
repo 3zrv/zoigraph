@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "app/clock.h"
-#include "graph/cluster.h"
 #include "graph/types.h"
 #include "graph/wikilinks.h"
 #include "persistence/db.h"
@@ -36,7 +35,6 @@ void render_inspector_tab(zg::app::Session& s,
     auto& search_query  = s.search_query;
     auto& search_hits   = s.search_hits;
     auto& tag_filter    = s.tag_filter;
-    auto& cluster_ids   = s.cluster_ids;
 
     ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
     ImGui::Text("edges    %d", static_cast<int>(edges.size()));
@@ -324,22 +322,6 @@ void render_inspector_tab(zg::app::Session& s,
                          static_cast<int>(filter_ptrs.size()))) {
             tag_filter = (filter_idx == 0) ? "" : unique_tags[static_cast<std::size_t>(filter_idx)];
         }
-    }
-
-    // Auto-cluster: button + clear button.  cluster_ids is the source of
-    // truth; populated on demand, displayed by the cluster halo above.
-    if (ImGui::Button("auto-cluster")) {
-        cluster_ids = zg::graph::label_propagation(
-            stored_nodes.size(), edges, /*max_iters=*/100);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("clear clusters")) {
-        cluster_ids.clear();
-    }
-    if (!cluster_ids.empty()) {
-        std::set<std::size_t> unique_clusters(cluster_ids.begin(), cluster_ids.end());
-        ImGui::TextDisabled("%zu clusters across %zu nodes",
-                            unique_clusters.size(), cluster_ids.size());
     }
 
     ImGui::Separator();

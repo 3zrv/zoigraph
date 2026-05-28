@@ -121,9 +121,10 @@ add_library(zg_ui STATIC
     src/ui/inspector_tab.cpp
     src/ui/help_tab.cpp
     src/ui/bones_panel.cpp
+    src/ui/project_tab.cpp
 )
 target_include_directories(zg_ui PUBLIC src)
-target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry zg_macros imgui raylib)
+target_link_libraries(zg_ui PUBLIC zg_app zg_telemetry zg_macros zg_graph zg_persistence imgui raylib)
 
 # ---- macros (operator-triggered camera flies: rabbit hole, throw bones) ----
 add_library(zg_macros STATIC
