@@ -14,7 +14,6 @@
 #include <random>
 #include <set>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -27,6 +26,7 @@
 #include "graph/wikilinks.h"
 #include "app/clock.h"
 #include "app/hotkeys.h"
+#include "app/phantom_lifecycle.h"
 #include "app/pick.h"
 #include "app/session.h"
 #include "input/escape_wipe.h"
@@ -201,42 +201,32 @@ int main() {
             seen_phantom_spawn.clear();
             tracker_db = db.get();
         }
-        {
-            std::unordered_set<long long> current_ids;
-            current_ids.reserve(phantoms.size());
-            for (const auto& ph : phantoms) {
-                current_ids.insert(ph.id);
-                if (seen_phantom_spawn.find(ph.id) == seen_phantom_spawn.end()) {
-                    seen_phantom_spawn[ph.id] = ph.spawn_time;
-                    if (db) {
-                        nlohmann::json p = {
-                            {"phantom_id",  ph.id},
-                            {"label",       ph.label},
-                            {"content",     ph.content},
-                            {"x",           ph.position.x},
-                            {"y",           ph.position.y},
-                            {"z",           ph.position.z},
-                            {"connections", ph.connections},
-                            {"source",      ph.source},
-                        };
-                        db->log_event("phantom_spawn", -1, p.dump());
-                    }
-                }
+        // Pure-logic diff in src/app/phantom_lifecycle.{h,cpp} (covered by
+        // test_phantom_lifecycle); this loop just translates the delta
+        // into log_event rows.
+        const auto delta = zg::app::phantom_lifecycle_diff(
+            seen_phantom_spawn, phantoms, GetTime());
+        if (db) {
+            for (std::size_t idx : delta.new_indices) {
+                const auto& ph = phantoms[idx];
+                nlohmann::json p = {
+                    {"phantom_id",  ph.id},
+                    {"label",       ph.label},
+                    {"content",     ph.content},
+                    {"x",           ph.position.x},
+                    {"y",           ph.position.y},
+                    {"z",           ph.position.z},
+                    {"connections", ph.connections},
+                    {"source",      ph.source},
+                };
+                db->log_event("phantom_spawn", -1, p.dump());
             }
-            for (auto it = seen_phantom_spawn.begin();
-                 it != seen_phantom_spawn.end();) {
-                if (current_ids.find(it->first) == current_ids.end()) {
-                    if (db) {
-                        nlohmann::json p = {
-                            {"phantom_id", it->first},
-                            {"lifetime_s", GetTime() - it->second},
-                        };
-                        db->log_event("phantom_decay", -1, p.dump());
-                    }
-                    it = seen_phantom_spawn.erase(it);
-                } else {
-                    ++it;
-                }
+            for (const auto& [id, lifetime_s] : delta.departed) {
+                nlohmann::json p = {
+                    {"phantom_id", id},
+                    {"lifetime_s", lifetime_s},
+                };
+                db->log_event("phantom_decay", -1, p.dump());
             }
         }
 
