@@ -932,6 +932,60 @@ TEST_CASE("db: log_event inserts rows with kind, node_id, payload and a unix-sec
     std::remove(tmpl);
 }
 
+TEST_CASE("db: deleted flag roundtrips through save/load") {
+    Database db(":memory:");
+    std::vector<StoredNode> in_nodes = {
+        {0, {0, 0, 0}, "alpha", "",  0, 0, "confirmed", {}, /*deleted=*/false},
+        {1, {1, 0, 0}, "beta",  "",  0, 0, "confirmed", {}, /*deleted=*/true},
+        {2, {2, 0, 0}, "gamma", "",  0, 0, "confirmed", {}, /*deleted=*/false},
+    };
+    db.save_graph(in_nodes, {});
+
+    std::vector<StoredNode> out_nodes;
+    std::vector<Edge>       out_edges;
+    REQUIRE(db.load_graph(out_nodes, out_edges));
+    REQUIRE(out_nodes.size() == 3);
+    CHECK_FALSE(out_nodes[0].deleted);
+    CHECK      (out_nodes[1].deleted);
+    CHECK_FALSE(out_nodes[2].deleted);
+}
+
+TEST_CASE("db: legacy DB without the deleted column migrates and loads with deleted=false") {
+    // Simulate a pre-deleted-column DB by creating the nodes table without
+    // that column, inserting a row, then opening it through Database which
+    // should run the ALTER TABLE migration and leave the row with
+    // deleted=false (the column's DEFAULT).
+    char tmpl[] = "/tmp/zg_db_legacy_XXXXXX";
+    REQUIRE(mkstemp(tmpl) >= 0);
+    {
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+        const char* legacy_schema =
+            "CREATE TABLE nodes ("
+            "  id INTEGER PRIMARY KEY,"
+            "  x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,"
+            "  title TEXT NOT NULL DEFAULT '',"
+            "  content TEXT NOT NULL DEFAULT ''"
+            ");";
+        char* err = nullptr;
+        REQUIRE(sqlite3_exec(raw, legacy_schema, nullptr, nullptr, &err) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+            "INSERT INTO nodes (id, x, y, z, title) VALUES (42, 0, 0, 0, 'old');",
+            nullptr, nullptr, &err) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    Database db(tmpl);  // migration runs here
+    std::vector<StoredNode> out_nodes;
+    std::vector<Edge>       out_edges;
+    REQUIRE(db.load_graph(out_nodes, out_edges));
+    REQUIRE(out_nodes.size() == 1);
+    CHECK(out_nodes[0].id == 42);
+    CHECK_FALSE(out_nodes[0].deleted);
+
+    std::remove(tmpl);
+}
+
 TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
     Database db(":memory:");
     for (int i = 0; i < 50; ++i) {

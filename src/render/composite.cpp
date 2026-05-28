@@ -31,12 +31,18 @@ void composite_scene(const RenderTexture2D& scene_rt,
 }
 
 void draw_edge_labels(const zg::app::Session& s, const Camera3D& camera) {
-    const auto& edges     = s.edges;
-    const auto& positions = s.positions;
+    const auto& edges        = s.edges;
+    const auto& positions    = s.positions;
+    const auto& stored_nodes = s.stored_nodes;
     const Vector3 cam_forward = Vector3Subtract(camera.target, camera.position);
     for (const auto& e : edges) {
         if (e.label.empty()) continue;
         if (e.source >= positions.size() || e.target >= positions.size()) continue;
+        // Skip labels whose endpoints are tombstoned (matches the
+        // line-render filter in scene.cpp so the label doesn't float in
+        // empty space).
+        if (e.source < stored_nodes.size() && stored_nodes[e.source].deleted) continue;
+        if (e.target < stored_nodes.size() && stored_nodes[e.target].deleted) continue;
         const Vector3 mid    = Vector3Lerp(positions[e.source], positions[e.target], 0.5f);
         const Vector3 to_mid = Vector3Subtract(mid, camera.position);
         if (Vector3DotProduct(to_mid, cam_forward) <= 0.0f) continue;

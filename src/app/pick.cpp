@@ -107,6 +107,8 @@ void handle_pick(Session& s,
         float best_dist = 0.0f;
         int   best_idx  = -1;
         for (std::size_t i = 0; i < positions.size(); ++i) {
+            // Tombstoned nodes aren't rendered and can't be picked.
+            if (i < stored_nodes.size() && stored_nodes[i].deleted) continue;
             const RayCollision hit = GetRayCollisionSphere(
                 ray, positions[i], zg::render::kNodeRadius);
             if (hit.hit && (best_idx < 0 || hit.distance < best_dist)) {

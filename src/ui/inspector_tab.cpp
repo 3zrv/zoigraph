@@ -242,6 +242,40 @@ void render_inspector_tab(zg::app::Session& s,
         ImGui::SameLine();
         if (ImGui::SmallButton("deselect")) selected_node = -1;
 
+        // Soft-delete: two-click arm/confirm pattern matches the project
+        // delete affordance. Sets the tombstone flag, persists, logs a
+        // node_delete event for the phase-2 pin-then-delete metric, then
+        // deselects. The row stays in the DB so the events join
+        // (phantom_pin -> node_delete) still finds the original pin row.
+        // Self node can't be deleted -- it's structural.
+        static bool delete_armed = false;
+        const bool is_self = (static_cast<std::size_t>(selected_node) == self_idx);
+        if (is_self) ImGui::BeginDisabled();
+        if (!delete_armed) {
+            if (ImGui::SmallButton("delete node...")) delete_armed = true;
+        } else {
+            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("yes, delete")) {
+                sn.deleted = true;
+                db->save_graph(stored_nodes, edges);
+                {
+                    nlohmann::json p = {
+                        {"node_id", sn.id},
+                        {"title_len",   sn.title.size()},
+                        {"content_len", sn.content.size()},
+                        {"tier",        sn.tier},
+                    };
+                    db->log_event("node_delete", sn.id, p.dump());
+                }
+                selected_node  = -1;
+                delete_armed   = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("cancel")) delete_armed = false;
+        }
+        if (is_self) ImGui::EndDisabled();
+
         // "Ask about selection" -- pipes the selected node + its spatial
         // neighbourhood to the LLM and lets the resulting phantom land
         // via the normal UDP listener. Disabled while a prior ask is

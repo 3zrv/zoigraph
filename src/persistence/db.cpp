@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     content      TEXT    NOT NULL DEFAULT '',
     first_seen   REAL    NOT NULL DEFAULT 0.0,
     last_touched REAL    NOT NULL DEFAULT 0.0,
-    tier         TEXT    NOT NULL DEFAULT 'confirmed'
+    tier         TEXT    NOT NULL DEFAULT 'confirmed',
+    deleted      INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS edges (
     source    INTEGER NOT NULL,
@@ -127,6 +128,7 @@ Database::Database(const std::string& path) : db_(nullptr) {
     if (!column_exists("first_seen"))   exec("ALTER TABLE nodes ADD COLUMN first_seen REAL NOT NULL DEFAULT 0.0;");
     if (!column_exists("last_touched")) exec("ALTER TABLE nodes ADD COLUMN last_touched REAL NOT NULL DEFAULT 0.0;");
     if (!column_exists("tier"))         exec("ALTER TABLE nodes ADD COLUMN tier TEXT NOT NULL DEFAULT 'confirmed';");
+    if (!column_exists("deleted"))      exec("ALTER TABLE nodes ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;");
 
     // Same migration check for edges metadata columns. Legacy DBs from
     // before the label/kind/certainty work get the columns added with
@@ -173,8 +175,8 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
         sqlite3_stmt* ins_node = nullptr;
         if (sqlite3_prepare_v2(db_,
                 "INSERT INTO nodes (id, x, y, z, title, content, "
-                "first_seen, last_touched, tier) "
-                "VALUES (?,?,?,?,?,?,?,?,?);",
+                "first_seen, last_touched, tier, deleted) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?);",
                 -1, &ins_node, nullptr) != SQLITE_OK) {
             throw_sqlite(db_, "prepare INSERT nodes");
         }
@@ -188,6 +190,7 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
             sqlite3_bind_double(ins_node, 7, n.first_seen);
             sqlite3_bind_double(ins_node, 8, n.last_touched);
             sqlite3_bind_text  (ins_node, 9, n.tier.c_str(),    -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int   (ins_node, 10, n.deleted ? 1 : 0);
             if (sqlite3_step(ins_node) != SQLITE_DONE) {
                 sqlite3_finalize(ins_node);
                 throw_sqlite(db_, "step INSERT nodes");
@@ -260,7 +263,7 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     sqlite3_stmt* q_nodes = nullptr;
     if (sqlite3_prepare_v2(db_,
             "SELECT id, x, y, z, title, content, "
-            "first_seen, last_touched, tier "
+            "first_seen, last_touched, tier, deleted "
             "FROM nodes ORDER BY id;",
             -1, &q_nodes, nullptr) != SQLITE_OK) {
         throw_sqlite(db_, "prepare SELECT nodes");
@@ -276,6 +279,7 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
         n.first_seen   = sqlite3_column_double(q_nodes, 6);
         n.last_touched = sqlite3_column_double(q_nodes, 7);
         if (const unsigned char* tr = sqlite3_column_text(q_nodes, 8)) n.tier = reinterpret_cast<const char*>(tr);
+        n.deleted = sqlite3_column_int(q_nodes, 9) != 0;
         nodes.push_back(std::move(n));
     }
     sqlite3_finalize(q_nodes);
