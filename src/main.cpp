@@ -212,6 +212,7 @@ int main() {
                         nlohmann::json p = {
                             {"phantom_id",  ph.id},
                             {"label",       ph.label},
+                            {"content",     ph.content},
                             {"x",           ph.position.x},
                             {"y",           ph.position.y},
                             {"z",           ph.position.z},

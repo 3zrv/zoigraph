@@ -61,19 +61,24 @@ void handle_pick(Session& s,
         promoted.id           = new_id;
         promoted.position     = ph.position;
         promoted.title        = ph.label;
-        promoted.content      = "";
+        promoted.content      = ph.content;
         promoted.first_seen   = promoted_ts;
         promoted.last_touched = promoted_ts;
         promoted.tier         = "phantom";
         stored_nodes.push_back(std::move(promoted));
 
+        // Edges from a freshly-pinned phantom land at certainty="phantom"
+        // (the lowest tier) -- they came from the model, not the operator,
+        // and the visual fade communicates that until the operator
+        // explicitly promotes them via the edge editor.
         for (long long target_id : ph.connections) {
             if (target_id < 0) continue;
             const auto tidx = static_cast<std::size_t>(target_id);
             if (tidx >= positions.size()) continue;
             if (tidx == static_cast<std::size_t>(new_id)) continue;
             const zg::graph::Edge new_edge{
-                static_cast<std::size_t>(new_id), tidx};
+                static_cast<std::size_t>(new_id), tidx,
+                /*label=*/"", /*kind=*/"", /*certainty=*/"phantom"};
             edges.push_back(new_edge);
             physics->enqueue_edge(new_edge);
         }
@@ -100,6 +105,7 @@ void handle_pick(Session& s,
                 {"phantom_id",    ph.id},
                 {"new_node_id",   new_id},
                 {"label",         ph.label},
+                {"content",       ph.content},
                 {"connections",   ph.connections},
                 {"time_to_pin_s", time_to_pin},
                 {"source",        ph.source},

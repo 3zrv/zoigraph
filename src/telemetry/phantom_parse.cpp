@@ -41,6 +41,9 @@ std::optional<Phantom> parse_phantom(std::string_view payload) {
     if (j.contains("source") && j["source"].is_string()) {
         p.source = j["source"].get<std::string>();
     }
+    if (j.contains("content") && j["content"].is_string()) {
+        p.content = j["content"].get<std::string>();
+    }
     p.spawn_time = 0.0;
     return p;
 }

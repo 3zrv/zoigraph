@@ -48,6 +48,25 @@ TEST_CASE("parse_phantom: non-string source is silently ignored") {
     CHECK(p->source.empty());
 }
 
+TEST_CASE("parse_phantom: optional content is picked up when present") {
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"content":"a one-sentence reasoning"})");
+    REQUIRE(p.has_value());
+    CHECK(p->content == "a one-sentence reasoning");
+}
+
+TEST_CASE("parse_phantom: content defaults to empty when absent") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0})");
+    REQUIRE(p.has_value());
+    CHECK(p->content.empty());
+}
+
+TEST_CASE("parse_phantom: non-string content is silently ignored") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"content":42})");
+    REQUIRE(p.has_value());
+    CHECK(p->content.empty());
+}
+
 TEST_CASE("parse_phantom: malformed json returns nullopt") {
     CHECK_FALSE(parse_phantom("not json at all").has_value());
     CHECK_FALSE(parse_phantom("{").has_value());
