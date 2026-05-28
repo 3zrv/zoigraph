@@ -129,11 +129,15 @@ add_library(zg_app STATIC
     src/app/session.cpp
     src/app/hotkeys.cpp
     src/app/pick.cpp
+    src/app/ask.cpp
 )
 target_include_directories(zg_app PUBLIC src)
 target_link_libraries(zg_app PUBLIC
     zg_persistence zg_physics_thread zg_graph zg_telemetry
     zg_input zg_macros zg_render imgui)
+if(WIN32)
+    target_link_libraries(zg_app PUBLIC ws2_32)
+endif()
 
 # ---- ui (ImGui tab renderers) ----------------------------------------------
 add_library(zg_ui STATIC

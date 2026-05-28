@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "app/ask.h"
 #include "graph/graph_buffer.h"
 #include "graph/types.h"
 #include "persistence/db.h"
@@ -23,6 +24,7 @@ namespace zg::app {
 struct Session {
     std::unique_ptr<zg::persistence::Database>    db;
     std::unique_ptr<zg::physics::PhysicsThread>   physics;
+    LlmAsk                                        ask;          // "Ask about selection" worker; process-scoped behaviour, parked here for inspector access
 
     std::vector<zg::persistence::StoredNode>      stored_nodes;
     std::vector<zg::graph::Edge>                  edges;

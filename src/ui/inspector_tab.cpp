@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <ctime>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -240,6 +241,40 @@ void render_inspector_tab(zg::app::Session& s,
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("deselect")) selected_node = -1;
+
+        // "Ask about selection" -- pipes the selected node + its spatial
+        // neighbourhood to the LLM and lets the resulting phantom land
+        // via the normal UDP listener. Disabled while a prior ask is
+        // still in flight so we never double-fire the subprocess. The
+        // status line below the button surfaces any error from the
+        // background worker (Ollama down / subprocess failure / etc).
+        ImGui::Spacing();
+        const auto ask_snap = s.ask.snapshot();
+        const bool thinking = ask_snap.state == zg::app::LlmAsk::State::Thinking;
+        if (thinking) ImGui::BeginDisabled();
+        if (ImGui::Button("ask about selection")) {
+            const std::string db_path =
+                (std::filesystem::path("projects") /
+                 (s.current_project + ".db")).string();
+            s.ask.start(db_path, sn.id);
+        }
+        if (thinking) ImGui::EndDisabled();
+        switch (ask_snap.state) {
+            case zg::app::LlmAsk::State::Idle:
+                break;
+            case zg::app::LlmAsk::State::Thinking:
+                ImGui::TextDisabled("%s", ask_snap.msg.c_str());
+                break;
+            case zg::app::LlmAsk::State::Done:
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                                   "%s", ask_snap.msg.c_str());
+                break;
+            case zg::app::LlmAsk::State::ErrNoOllama:
+            case zg::app::LlmAsk::State::ErrSubprocess:
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                                   "%s", ask_snap.msg.c_str());
+                break;
+        }
 
         // Incident edges — list every edge touching the selected node
         // with editable label / kind / certainty. Updates persist
