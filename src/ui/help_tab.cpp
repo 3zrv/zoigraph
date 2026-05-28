@@ -14,6 +14,7 @@ void render_help_tab() {
     ImGui::TextDisabled("H KEY              rabbit hole");
     ImGui::TextDisabled("B KEY              throw the bones");
     ImGui::TextDisabled("T KEY              timeline collapse");
+    ImGui::TextDisabled("L KEY              toggle all node titles");
     ImGui::TextDisabled("ESC x 3            wipe + exit");
 }
 

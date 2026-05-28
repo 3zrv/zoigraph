@@ -167,6 +167,7 @@ add_library(zg_render STATIC
     src/render/draw.cpp
     src/render/scene.cpp
     src/render/composite.cpp
+    src/render/labels.cpp
 )
 target_include_directories(zg_render PUBLIC src)
 # scene + composite read from Session, Bones, EscapeWipe — pull in the struct

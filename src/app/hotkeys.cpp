@@ -23,7 +23,8 @@ void handle_hotkeys(Session& s,
                     zg::macros::RabbitHole& rabbit,
                     zg::macros::Bones& bones,
                     std::mt19937& rng,
-                    bool& requested_exit) {
+                    bool& requested_exit,
+                    bool& show_all_labels) {
     auto& physics       = s.physics;
     auto& stored_nodes  = s.stored_nodes;
     auto& edges         = s.edges;
@@ -65,6 +66,10 @@ void handle_hotkeys(Session& s,
             };
             s.db->log_event("bones_throw", -1, p.dump());
         }
+    }
+
+    if (IsKeyPressed(KEY_L) && !typing) {
+        show_all_labels = !show_all_labels;
     }
 
     if (IsKeyPressed(KEY_T) && !typing && physics && !stored_nodes.empty()) {

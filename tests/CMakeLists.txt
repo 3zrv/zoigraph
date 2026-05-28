@@ -71,3 +71,7 @@ add_test(NAME promote COMMAND test_promote)
 add_executable(test_phantom_lifecycle test_phantom_lifecycle.cpp)
 target_link_libraries(test_phantom_lifecycle PRIVATE zg_app doctest::doctest)
 add_test(NAME phantom_lifecycle COMMAND test_phantom_lifecycle)
+
+add_executable(test_labels test_labels.cpp)
+target_link_libraries(test_labels PRIVATE zg_render doctest::doctest)
+add_test(NAME labels COMMAND test_labels)

@@ -36,6 +36,7 @@
 #include "render/composite.h"
 #include "render/draw.h"
 #include "render/imgui_theme.h"
+#include "render/labels.h"
 #include "render/scene.h"
 #include "render/shaders.h"
 #include "render/sizes.h"
@@ -138,10 +139,11 @@ int main() {
     auto& positions     = session.positions;
 
     std::vector<zg::telemetry::Phantom> phantoms;
-    bool                             show_grid       = true;
-    bool                             post_process    = true;
-    bool                             dim_filtered    = true;  // dim non-matching nodes when a tag filter is active
-    bool                             focus_inspector = false; // set by double-click on a node, consumed by the Inspector tab
+    bool                             show_grid        = true;
+    bool                             post_process     = true;
+    bool                             dim_filtered     = true;  // dim non-matching nodes when a tag filter is active
+    bool                             show_all_labels  = false; // L toggles all-node titles overlay
+    bool                             focus_inspector  = false; // set by double-click on a node, consumed by the Inspector tab
     zg::app::DoubleClickState        dbl_click;
     RabbitHole                       rabbit;
     Bones                            bones;
@@ -181,7 +183,8 @@ int main() {
         }
 
         zg::app::handle_hotkeys(session, camera, esc_wipe, kWipeWindow,
-                                rabbit, bones, rabbit_rng, requested_exit);
+                                rabbit, bones, rabbit_rng, requested_exit,
+                                show_all_labels);
 
         // Positions-only snapshot — edges are owned by main so the buffer
         // doesn't clobber operator edits to label / kind / certainty.
@@ -245,6 +248,20 @@ int main() {
         ClearBackground(BLACK);
         zg::render::composite_scene(scene_rt, crt_shader, crt_locs, post_process);
         zg::render::draw_edge_labels(session, camera);
+        // Node titles for the in-focus set (selected + 1-hop + phantom
+        // targets + bones triple), or every non-deleted node when L is
+        // toggled on. Drawn AFTER the CRT composite so the text stays
+        // crisp, and BEFORE ImGui so the inspector still sits on top.
+        // The static empty_bones avoids materialising a temporary in the
+        // panel-closed branch -- both arms of the ?: stay lvalue refs.
+        static const std::vector<std::size_t> empty_bones;
+        const std::vector<std::size_t>& bones_for_labels =
+            bones.panel_open ? bones.chosen : empty_bones;
+        const auto label_set = zg::render::compute_label_set(
+            session.selected_node, session.edges, phantoms,
+            bones_for_labels, session.stored_nodes, show_all_labels);
+        zg::render::draw_node_labels(label_set, session.positions,
+                                     session.stored_nodes, camera);
 
         rlImGuiBegin();
 
