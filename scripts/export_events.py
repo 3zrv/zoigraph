@@ -73,10 +73,13 @@ def summarize(events: list[dict]) -> None:
     spawned: dict = {}   # phantom_id -> spawn ts
     pinned:  dict = {}   # phantom_id -> pin ts
     decayed: dict = {}   # phantom_id -> decay ts
+    source_of: dict = {} # phantom_id -> source tag (from spawn payload)
     for e in events:
         p = e["parsed"]
         if e["kind"] == "phantom_spawn":
-            spawned[p.get("phantom_id")] = e["ts"]
+            pid = p.get("phantom_id")
+            spawned[pid] = e["ts"]
+            source_of[pid] = p.get("source") or "(unsourced)"
         elif e["kind"] == "phantom_pin":
             pinned[p.get("phantom_id")] = e["ts"]
         elif e["kind"] == "phantom_decay":
@@ -136,6 +139,29 @@ def summarize(events: list[dict]) -> None:
     print(f"  pin-then-edit-within-60s: "
           f"{len(pinned_then_edited)}/{len(pin_ts_by_node)} ({pte_rate:.1f}%)")
     print(f"  bones throws:        {by_kind.get('bones_throw', 0)}")
+
+    # By-source breakdown. Required for the ceiling-vs-floor (Claude vs
+    # Ollama) comparison the plan calls out as Phase 2's most informative
+    # metric. Sources are tags self-reported by the emitter, so any
+    # post-hoc disagreement means the analyst, not the model, picks who's
+    # at fault. Sorted by spawn count so dominant emitters surface first.
+    if source_of:
+        per_source: dict[str, dict[str, int]] = {}
+        for pid, src in source_of.items():
+            stats = per_source.setdefault(src, {"spawned": 0, "pinned": 0, "decayed": 0})
+            stats["spawned"] += 1
+            if pid in pinned:  stats["pinned"]  += 1
+            if pid in decayed: stats["decayed"] += 1
+        print()
+        print(f"  by source (pin rate = pinned / spawned):")
+        print(f"    {'source':<28s} {'spawned':>8s} {'pinned':>8s} "
+              f"{'decayed':>8s} {'pin %':>7s}")
+        for src in sorted(per_source.keys(),
+                          key=lambda s: -per_source[s]["spawned"]):
+            st = per_source[src]
+            pr = (100 * st["pinned"] / st["spawned"]) if st["spawned"] else 0
+            print(f"    {src:<28s} {st['spawned']:>8d} {st['pinned']:>8d} "
+                  f"{st['decayed']:>8d} {pr:>6.1f}%")
 
     print()
     print("=== phase-2 stop criteria ===")

@@ -216,6 +216,7 @@ int main() {
                             {"y",           ph.position.y},
                             {"z",           ph.position.z},
                             {"connections", ph.connections},
+                            {"source",      ph.source},
                         };
                         db->log_event("phantom_spawn", -1, p.dump());
                     }

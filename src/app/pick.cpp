@@ -102,6 +102,7 @@ void handle_pick(Session& s,
                 {"label",         ph.label},
                 {"connections",   ph.connections},
                 {"time_to_pin_s", time_to_pin},
+                {"source",        ph.source},
             };
             db->log_event("phantom_pin", new_id, payload.dump());
         }

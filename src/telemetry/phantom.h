@@ -17,6 +17,7 @@ struct Phantom {
     std::string            label;        // optional human-readable tag for the inspector
     double                 spawn_time;   // GetTime() seconds at spawn, populated by the listener
     std::vector<long long> connections;  // optional Static Node ids this phantom is wired to
+    std::string            source;       // optional emitter tag (e.g. "ollama:llama3.2:3b", "claude:sonnet"); empty if unspecified
 };
 
 }  // namespace zg::telemetry
