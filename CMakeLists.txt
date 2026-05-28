@@ -102,6 +102,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(doctest)
 
+# ---- Windows-only: kill the wingdi/winuser ↔ raylib symbol collisions ------
+# raylib's <raylib.h> declares `struct Rectangle` (also `CloseWindow`,
+# `ShowCursor`, `LoadImage*`, etc.). The Win32 SDK declares functions of
+# the same names in <wingdi.h> / <winuser.h>, which get pulled in via any
+# transitive <windows.h> include (e.g. <winsock2.h> in telemetry). Define
+# NOGDI / NOUSER to ask the SDK headers not to expose those symbols.
+#
+# Applied AFTER FetchContent_MakeAvailable so it only attaches to targets
+# declared below — raylib + glfw still need GDI/USER for their windowing
+# implementation and would not compile with these defined.
+if(WIN32)
+    add_compile_definitions(NOGDI NOUSER)
+endif()
+
 # ---- physics (pure functions, separately testable) -------------------------
 add_library(zg_physics STATIC
     src/physics/forces.cpp
