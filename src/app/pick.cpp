@@ -88,12 +88,16 @@ void handle_pick(Session& s,
             seen_phantom_spawn.erase(spawn_it);
         }
         if (db) {
+            nlohmann::json conns = nlohmann::json::array();
+            for (const auto& c : ph.connections) {
+                conns.push_back({{"target", c.target}, {"kind", c.kind}});
+            }
             nlohmann::json payload = {
                 {"phantom_id",    ph.id},
                 {"new_node_id",   new_id},
                 {"label",         ph.label},
                 {"content",       ph.content},
-                {"connections",   ph.connections},
+                {"connections",   conns},
                 {"time_to_pin_s", time_to_pin},
                 {"source",        ph.source},
             };

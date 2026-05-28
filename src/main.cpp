@@ -209,6 +209,10 @@ int main() {
         if (db) {
             for (std::size_t idx : delta.new_indices) {
                 const auto& ph = phantoms[idx];
+                nlohmann::json conns = nlohmann::json::array();
+                for (const auto& c : ph.connections) {
+                    conns.push_back({{"target", c.target}, {"kind", c.kind}});
+                }
                 nlohmann::json p = {
                     {"phantom_id",  ph.id},
                     {"label",       ph.label},
@@ -216,7 +220,7 @@ int main() {
                     {"x",           ph.position.x},
                     {"y",           ph.position.y},
                     {"z",           ph.position.z},
-                    {"connections", ph.connections},
+                    {"connections", conns},
                     {"source",      ph.source},
                 };
                 db->log_event("phantom_spawn", -1, p.dump());

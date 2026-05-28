@@ -187,9 +187,9 @@ void draw_scene_3d(const zg::app::Session& s,
             const Color glow{255, 200, 60, static_cast<unsigned char>(life * 255.0f)};
             DrawSphereWires(ph.position, kPhantomRadius, 6, 8, glow);
 
-            for (long long target_id : ph.connections) {
-                const auto idx = static_cast<std::size_t>(target_id);
-                if (target_id < 0 || idx >= positions.size()) continue;
+            for (const auto& c : ph.connections) {
+                const auto idx = static_cast<std::size_t>(c.target);
+                if (c.target < 0 || idx >= positions.size()) continue;
                 draw_jagged_line(ph.position, positions[idx], glow, now, ph.id);
             }
         }

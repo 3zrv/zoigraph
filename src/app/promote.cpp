@@ -17,14 +17,18 @@ PromotionResult promote_phantom(const zg::telemetry::Phantom& ph,
     out.node.tier         = "phantom";
 
     out.edges.reserve(ph.connections.size());
-    for (long long target_id : ph.connections) {
-        if (target_id < 0) continue;
-        const auto tidx = static_cast<std::size_t>(target_id);
+    for (const auto& c : ph.connections) {
+        if (c.target < 0) continue;
+        const auto tidx = static_cast<std::size_t>(c.target);
         if (tidx >= positions_size) continue;
         if (tidx == static_cast<std::size_t>(new_id)) continue;
+        // edge.kind is the model's proposed relationship type; the trust
+        // signal stays at certainty="phantom" so the kind alone doesn't
+        // imply validation. Operator promotes both by editing certainty
+        // up in the inspector.
         out.edges.push_back(zg::graph::Edge{
             static_cast<std::size_t>(new_id), tidx,
-            /*label=*/"", /*kind=*/"", /*certainty=*/"phantom"});
+            /*label=*/"", /*kind=*/c.kind, /*certainty=*/"phantom"});
     }
     return out;
 }

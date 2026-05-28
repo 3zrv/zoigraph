@@ -193,13 +193,14 @@ TEST_CASE("parse_phantom: label that isn't a string is silently dropped") {
     CHECK(p->label.empty());
 }
 
-TEST_CASE("parse_phantom: connections array of integers is picked up") {
+TEST_CASE("parse_phantom: legacy bare-int connections become Connection{target,kind=\"\"}") {
     const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":[12,87,400]})");
     REQUIRE(p.has_value());
     REQUIRE(p->connections.size() == 3);
-    CHECK(p->connections[0] == 12);
-    CHECK(p->connections[1] == 87);
-    CHECK(p->connections[2] == 400);
+    CHECK(p->connections[0].target == 12);
+    CHECK(p->connections[0].kind.empty());
+    CHECK(p->connections[1].target == 87);
+    CHECK(p->connections[2].target == 400);
 }
 
 TEST_CASE("parse_phantom: missing connections field yields empty vector") {
@@ -214,13 +215,13 @@ TEST_CASE("parse_phantom: empty connections array yields empty vector") {
     CHECK(p->connections.empty());
 }
 
-TEST_CASE("parse_phantom: non-integer entries inside connections are silently skipped") {
+TEST_CASE("parse_phantom: non-integer non-object entries inside connections are silently skipped") {
     const auto p = parse_phantom(
         R"({"id":1,"x":0,"y":0,"z":0,"connections":[5,"hello",3.14,null,9]})");
     REQUIRE(p.has_value());
     REQUIRE(p->connections.size() == 2);
-    CHECK(p->connections[0] == 5);
-    CHECK(p->connections[1] == 9);
+    CHECK(p->connections[0].target == 5);
+    CHECK(p->connections[1].target == 9);
 }
 
 TEST_CASE("parse_phantom: connections that isn't an array is silently dropped") {
@@ -236,9 +237,9 @@ TEST_CASE("parse_phantom: connections may include negative ids (no sign filter)"
     const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"connections":[-5,7,-99]})");
     REQUIRE(p.has_value());
     REQUIRE(p->connections.size() == 3);
-    CHECK(p->connections[0] == -5);
-    CHECK(p->connections[1] == 7);
-    CHECK(p->connections[2] == -99);
+    CHECK(p->connections[0].target == -5);
+    CHECK(p->connections[1].target == 7);
+    CHECK(p->connections[2].target == -99);
 }
 
 TEST_CASE("parse_phantom: connections with very large id values are accepted") {
@@ -247,7 +248,7 @@ TEST_CASE("parse_phantom: connections with very large id values are accepted") {
         R"({"id":1,"x":0,"y":0,"z":0,"connections":[9223372036854775806]})");
     REQUIRE(p.has_value());
     REQUIRE(p->connections.size() == 1);
-    CHECK(p->connections[0] == 9223372036854775806LL);
+    CHECK(p->connections[0].target == 9223372036854775806LL);
 }
 
 TEST_CASE("parse_phantom: 100-entry connections array round-trips") {
@@ -261,8 +262,71 @@ TEST_CASE("parse_phantom: 100-entry connections array round-trips") {
     const auto p = parse_phantom(payload);
     REQUIRE(p.has_value());
     REQUIRE(p->connections.size() == 100);
-    CHECK(p->connections[0]  == 0);
-    CHECK(p->connections[99] == 99);
+    CHECK(p->connections[0].target  == 0);
+    CHECK(p->connections[99].target == 99);
+}
+
+TEST_CASE("parse_phantom: object-shape connections carry kind through") {
+    const auto p = parse_phantom(R"({
+        "id":1,"x":0,"y":0,"z":0,
+        "connections":[
+            {"target":12, "kind":"knows"},
+            {"target":87, "kind":"shell-of"}
+        ]
+    })");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 2);
+    CHECK(p->connections[0].target == 12);
+    CHECK(p->connections[0].kind   == "knows");
+    CHECK(p->connections[1].target == 87);
+    CHECK(p->connections[1].kind   == "shell-of");
+}
+
+TEST_CASE("parse_phantom: object connection without kind yields empty kind") {
+    const auto p = parse_phantom(R"({
+        "id":1,"x":0,"y":0,"z":0,
+        "connections":[{"target":42}]
+    })");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 1);
+    CHECK(p->connections[0].target == 42);
+    CHECK(p->connections[0].kind.empty());
+}
+
+TEST_CASE("parse_phantom: object connection without target is silently dropped") {
+    const auto p = parse_phantom(R"({
+        "id":1,"x":0,"y":0,"z":0,
+        "connections":[{"kind":"knows"}, {"target":7,"kind":"saw-at"}]
+    })");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 1);
+    CHECK(p->connections[0].target == 7);
+    CHECK(p->connections[0].kind   == "saw-at");
+}
+
+TEST_CASE("parse_phantom: object connection with non-string kind silently drops the kind only") {
+    const auto p = parse_phantom(R"({
+        "id":1,"x":0,"y":0,"z":0,
+        "connections":[{"target":3, "kind":42}]
+    })");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 1);
+    CHECK(p->connections[0].target == 3);
+    CHECK(p->connections[0].kind.empty());
+}
+
+TEST_CASE("parse_phantom: mixed bare-int and object connections in the same array") {
+    const auto p = parse_phantom(R"({
+        "id":1,"x":0,"y":0,"z":0,
+        "connections":[5, {"target":12,"kind":"knows"}, 99]
+    })");
+    REQUIRE(p.has_value());
+    REQUIRE(p->connections.size() == 3);
+    CHECK(p->connections[0].target == 5);
+    CHECK(p->connections[0].kind.empty());
+    CHECK(p->connections[1].target == 12);
+    CHECK(p->connections[1].kind   == "knows");
+    CHECK(p->connections[2].target == 99);
 }
 
 TEST_CASE("phantom_buffer: size is zero before any add") {
@@ -401,22 +465,26 @@ TEST_CASE("phantom_buffer: snapshot returns phantoms in insertion order") {
     }
 }
 
-TEST_CASE("phantom_buffer: connections survive add and snapshot intact") {
+TEST_CASE("phantom_buffer: connections (including kinds) survive add and snapshot intact") {
     PhantomBuffer buf;
     Phantom p{};
     p.id          = 1;
     p.spawn_time  = 100.0;
-    p.connections = {12, 87, -3, 400};
+    p.connections = {{12, "knows"}, {87, "shell-of"}, {-3, ""}, {400, "saw-at"}};
     buf.add(p);
 
     std::vector<Phantom> out;
     buf.snapshot_and_expire(out, 60.0f, 100.5);
     REQUIRE(out.size() == 1);
     REQUIRE(out[0].connections.size() == 4);
-    CHECK(out[0].connections[0] == 12);
-    CHECK(out[0].connections[1] == 87);
-    CHECK(out[0].connections[2] == -3);
-    CHECK(out[0].connections[3] == 400);
+    CHECK(out[0].connections[0].target == 12);
+    CHECK(out[0].connections[0].kind   == "knows");
+    CHECK(out[0].connections[1].target == 87);
+    CHECK(out[0].connections[1].kind   == "shell-of");
+    CHECK(out[0].connections[2].target == -3);
+    CHECK(out[0].connections[2].kind.empty());
+    CHECK(out[0].connections[3].target == 400);
+    CHECK(out[0].connections[3].kind   == "saw-at");
 }
 
 TEST_CASE("phantom_buffer: remove by id drops every matching entry") {
