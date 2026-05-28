@@ -33,14 +33,6 @@
 
 namespace zg::app {
 
-namespace {
-
-// 127.0.0.1:<port> reachable via a fresh TCP handshake? Loopback connects
-// return immediately on both happy and failure paths (ECONNREFUSED if
-// nothing is listening), so a plain blocking connect doubles as a
-// millisecond-scale liveness probe -- no non-blocking + select dance
-// required for a daemon on the same host. Returns true iff connect
-// succeeds.
 bool tcp_probe_localhost(int port) {
 #if defined(_WIN32)
     WSADATA wsa;
@@ -66,10 +58,6 @@ bool tcp_probe_localhost(int port) {
     return rc == 0;
 }
 
-// Pull the most recent non-empty line out of captured subprocess output.
-// Used to surface the script's stderr message in the inspector when the
-// subprocess fails -- the LAST line is usually the error summary, the
-// preceding lines are mock-output dumps we don't want to show.
 std::string last_nonblank_line(const std::string& s) {
     if (s.empty()) return "";
     std::size_t end = s.size();
@@ -79,8 +67,6 @@ std::string last_nonblank_line(const std::string& s) {
     while (start > 0 && s[start - 1] != '\n' && s[start - 1] != '\r') --start;
     return s.substr(start, end - start);
 }
-
-}  // namespace
 
 LlmAsk::~LlmAsk() {
     // Worker thread may still be inside popen() waiting on Ollama. Joining

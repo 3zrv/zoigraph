@@ -6,6 +6,23 @@
 
 namespace zg::app {
 
+// 127.0.0.1:<port> reachable via a fresh TCP handshake? Loopback connects
+// return immediately on both happy and failure paths (ECONNREFUSED if
+// nothing is listening), so a plain blocking connect doubles as a
+// millisecond-scale liveness probe -- no non-blocking + select dance
+// required for a daemon on the same host. Returns true iff connect
+// succeeds. Exposed for test_ask; LlmAsk uses it as the Ollama liveness
+// check before shelling out to a subprocess.
+bool tcp_probe_localhost(int port);
+
+// Pull the most recent non-empty line out of captured subprocess output.
+// Used to surface the script's stderr message in the inspector when the
+// subprocess fails -- the LAST line is usually the error summary, the
+// preceding lines are noise we don't want to show. Pure string function,
+// exposed so test_ask can pin the corner cases.
+std::string last_nonblank_line(const std::string& s);
+
+
 // "Ask about selection" — fires the LLM at the currently selected node and
 // lets the resulting phantom land via the normal UDP listener. One instance
 // per main(); the inspector calls start() on click, snapshot() each frame
