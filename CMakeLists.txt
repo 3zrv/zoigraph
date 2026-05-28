@@ -140,14 +140,19 @@ add_library(zg_macros STATIC
 target_include_directories(zg_macros PUBLIC src)
 target_link_libraries(zg_macros PUBLIC zg_graph raylib)
 
-# ---- render (shaders + imgui theme + camera + small draw helpers) ----------
+# ---- render (shaders + imgui theme + camera + small draw helpers + scene) --
 add_library(zg_render STATIC
     src/render/imgui_theme.cpp
     src/render/camera.cpp
     src/render/draw.cpp
+    src/render/scene.cpp
 )
 target_include_directories(zg_render PUBLIC src)
-target_link_libraries(zg_render PUBLIC imgui raylib)
+# scene.cpp reads from Session + Bones; depend on zg_graph + zg_macros for the
+# struct definitions. zg_app would be the natural choice but zg_app already
+# links zg_render (for hotkeys' update_orbit_camera call), so taking that here
+# would loop. The struct deps are enough — we never call into zg_app code.
+target_link_libraries(zg_render PUBLIC imgui raylib zg_graph zg_macros)
 
 # ---- input (pure key/event state machines, testable without raylib) --------
 add_library(zg_input STATIC src/input/escape_wipe.cpp)
