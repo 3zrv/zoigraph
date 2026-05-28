@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    ts      REAL    NOT NULL,
+    kind    TEXT    NOT NULL,
+    node_id INTEGER,
+    payload TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_ts_idx   ON events (ts);
+CREATE INDEX IF NOT EXISTS events_kind_idx ON events (kind);
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
     content,
@@ -451,6 +459,34 @@ void Database::update_node_tier(long long id, const std::string& tier) {
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         throw_sqlite(db_, "step UPDATE nodes (tier)");
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::log_event(const std::string& kind,
+                         long long node_id,
+                         const std::string& payload) {
+    sqlite3_stmt* stmt = nullptr;
+    // (julianday('now') - 2440587.5) * 86400 -> unix seconds with fractional
+    // precision. Done in SQL so we don't pull <chrono> into this TU just for
+    // a timestamp, and the value matches whatever julianday('now') returns
+    // on the box at insert time.
+    if (sqlite3_prepare_v2(db_,
+            "INSERT INTO events (ts, kind, node_id, payload) VALUES ("
+            "(julianday('now') - 2440587.5) * 86400.0, ?, ?, ?);",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare INSERT events");
+    }
+    sqlite3_bind_text(stmt, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
+    if (node_id >= 0) {
+        sqlite3_bind_int64(stmt, 2, node_id);
+    } else {
+        sqlite3_bind_null(stmt, 2);
+    }
+    sqlite3_bind_text(stmt, 3, payload.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step INSERT events");
     }
     sqlite3_finalize(stmt);
 }

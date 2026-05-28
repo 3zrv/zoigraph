@@ -878,3 +878,90 @@ TEST_CASE("db: load returns nodes ordered by id") {
     CHECK(nodes[1].id == 5);
     CHECK(nodes[2].id == 7);
 }
+
+TEST_CASE("db: log_event inserts rows with kind, node_id, payload and a unix-seconds ts") {
+    Database db(":memory:");
+    sqlite3* raw = nullptr;
+    // Open a separate connection to verify what log_event wrote. ":memory:"
+    // databases are connection-private, so use a temp file path instead.
+    char tmpl[] = "/tmp/zg_db_events_XXXXXX";
+    REQUIRE(mkstemp(tmpl) >= 0);
+    {
+        Database fdb(tmpl);
+        fdb.log_event("phantom_spawn", 42, "{\"label\":\"alice\"}");
+        fdb.log_event("phantom_pin",   42, "{\"new_id\":42}");
+        fdb.log_event("bones_throw",  -1, "{\"chosen\":[1,2,3]}");
+    }
+
+    REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(raw,
+        "SELECT ts, kind, node_id, payload FROM events ORDER BY rowid;",
+        -1, &stmt, nullptr) == SQLITE_OK);
+
+    // row 0: phantom_spawn for node 42
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    const double ts0 = sqlite3_column_double(stmt, 0);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)))
+          == "phantom_spawn");
+    CHECK(sqlite3_column_int64(stmt, 2) == 42);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)))
+          == "{\"label\":\"alice\"}");
+    // ts is unix seconds; should land somewhere between 2020-01-01 and the
+    // year 2100. Tight enough to catch a unit mistake (julianday vs unix),
+    // loose enough to survive long after this is written.
+    CHECK(ts0 > 1577836800.0);   // 2020-01-01 UTC
+    CHECK(ts0 < 4102444800.0);   // 2100-01-01 UTC
+
+    // row 1: phantom_pin
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)))
+          == "phantom_pin");
+
+    // row 2: bones_throw with NULL node_id (we passed -1)
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)))
+          == "bones_throw");
+    CHECK(sqlite3_column_type(stmt, 2) == SQLITE_NULL);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)))
+          == "{\"chosen\":[1,2,3]}");
+
+    REQUIRE(sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+    std::remove(tmpl);
+}
+
+TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
+    Database db(":memory:");
+    for (int i = 0; i < 50; ++i) {
+        db.log_event("tick", i, "");
+    }
+    sqlite3* raw = nullptr;
+    // re-prep on a temp file so we can read events back. Skip if we're
+    // running against :memory: in this test variant.
+    char tmpl[] = "/tmp/zg_db_events2_XXXXXX";
+    REQUIRE(mkstemp(tmpl) >= 0);
+    {
+        Database fdb(tmpl);
+        for (int i = 0; i < 50; ++i) fdb.log_event("tick", i, "");
+    }
+    REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(raw,
+        "SELECT ts FROM events ORDER BY rowid;",
+        -1, &stmt, nullptr) == SQLITE_OK);
+
+    double prev = -1.0;
+    int rows = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const double ts = sqlite3_column_double(stmt, 0);
+        CHECK(ts >= prev);
+        prev = ts;
+        ++rows;
+    }
+    CHECK(rows == 50);
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+    std::remove(tmpl);
+}

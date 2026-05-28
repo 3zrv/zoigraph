@@ -13,7 +13,11 @@
 #include <ctime>
 #include <random>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "graph/cluster.h"
 #include "graph/graph_buffer.h"
@@ -142,6 +146,16 @@ int main() {
     RabbitHole                       rabbit;
     Bones                            bones;
 
+    // Phase-2 instrumentation: per-phantom spawn timestamps so the render
+    // loop can diff each snapshot against last frame's set and emit
+    // phantom_spawn / phantom_decay events into the active project DB.
+    // handle_pick erases entries on a successful pin so the diff doesn't
+    // misclassify pins as decays. tracker_db pins which project DB the
+    // map is associated with so a project switch resets it without
+    // logging spurious decays into the newly-opened DB.
+    std::unordered_map<long long, double> seen_phantom_spawn;
+    zg::persistence::Database*            tracker_db = nullptr;
+
     // The lambda captures bones / rabbit so a project switch always closes
     // the bones scratch panel and cancels any in-flight rabbit hole. The
     // Session-owned resets (selected_node, search_*, etc.) happen inside
@@ -174,8 +188,59 @@ int main() {
         buffer.snapshot(positions);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
+        // Phantom lifecycle telemetry. Project-switch detection
+        // first: if the DB pointer moved, drop the tracker without logging
+        // anything (those phantoms didn't really "decay" -- the operator
+        // changed contexts). Then diff: new ids -> spawn event, missing
+        // ids -> decay event (pins were already erased by handle_pick
+        // before this block runs on the next frame -- but on the SAME
+        // frame, the spawn we'd otherwise miss is also handled by adding
+        // the phantom to the tracker BEFORE the pick call. Order matters:
+        // snapshot -> spawn-diff -> pick.
+        if (db.get() != tracker_db) {
+            seen_phantom_spawn.clear();
+            tracker_db = db.get();
+        }
+        {
+            std::unordered_set<long long> current_ids;
+            current_ids.reserve(phantoms.size());
+            for (const auto& ph : phantoms) {
+                current_ids.insert(ph.id);
+                if (seen_phantom_spawn.find(ph.id) == seen_phantom_spawn.end()) {
+                    seen_phantom_spawn[ph.id] = ph.spawn_time;
+                    if (db) {
+                        nlohmann::json p = {
+                            {"phantom_id",  ph.id},
+                            {"label",       ph.label},
+                            {"x",           ph.position.x},
+                            {"y",           ph.position.y},
+                            {"z",           ph.position.z},
+                            {"connections", ph.connections},
+                            {"source",      ph.source},
+                        };
+                        db->log_event("phantom_spawn", -1, p.dump());
+                    }
+                }
+            }
+            for (auto it = seen_phantom_spawn.begin();
+                 it != seen_phantom_spawn.end();) {
+                if (current_ids.find(it->first) == current_ids.end()) {
+                    if (db) {
+                        nlohmann::json p = {
+                            {"phantom_id", it->first},
+                            {"lifetime_s", GetTime() - it->second},
+                        };
+                        db->log_event("phantom_decay", -1, p.dump());
+                    }
+                    it = seen_phantom_spawn.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         zg::app::handle_pick(session, camera, phantoms, phantom_buffer,
-                             dbl_click, focus_inspector);
+                             dbl_click, focus_inspector, seen_phantom_spawn);
 
         zg::render::draw_scene_3d(session, phantoms, camera, scene_rt,
                                   node_mesh, node_material, node_material_dim,

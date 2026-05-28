@@ -78,6 +78,18 @@ public:
                      const std::string& kind,
                      const std::string& certainty);
 
+    // Append-only telemetry log for the phase-2 trust-gradient measurement
+    // (see llm_bridge.md). `kind` is a short tag identifying the event type
+    // ("phantom_spawn", "phantom_pin", "phantom_decay", "node_edit",
+    // "bones_throw"). `node_id` is the relevant node id if applicable
+    // (-1 otherwise). `payload` is a free-form JSON blob whose schema
+    // varies by kind. `ts` is captured automatically with sqlite3 julianday
+    // converted to unix seconds at the SQL level. Single INSERT; safe to
+    // call from the main thread at any frame rate.
+    void log_event(const std::string& kind,
+                   long long node_id,
+                   const std::string& payload);
+
 private:
     void exec(const char* sql);
 

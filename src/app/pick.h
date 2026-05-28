@@ -2,6 +2,7 @@
 
 #include <raylib.h>
 
+#include <unordered_map>
 #include <vector>
 
 #include "app/session.h"
@@ -26,13 +27,20 @@ struct DoubleClickState {
 // intersection. A second click on the same node within 350 ms sets
 // focus_inspector so the next ImGui frame can flip to the Inspector tab.
 //
+// `seen_phantom_spawn` is the phase-2 spawn-tracker map (phantom id ->
+// spawn unix-ts). On a successful pin we erase the picked phantom's
+// entry so main's per-frame diff doesn't misclassify the pin as a decay,
+// and log a `phantom_pin` event into the session DB with the time-to-pin.
+//
 // Mutates session.{stored_nodes, edges, selected_node}, the
-// phantom_buffer, the dbl tracker, and focus_inspector.
+// phantom_buffer, the dbl tracker, focus_inspector, and
+// seen_phantom_spawn.
 void handle_pick(Session& session,
                  const Camera3D& camera,
                  const std::vector<zg::telemetry::Phantom>& phantoms,
                  zg::telemetry::PhantomBuffer& phantom_buffer,
                  DoubleClickState& dbl,
-                 bool& focus_inspector);
+                 bool& focus_inspector,
+                 std::unordered_map<long long, double>& seen_phantom_spawn);
 
 }  // namespace zg::app

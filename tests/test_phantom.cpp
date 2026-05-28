@@ -29,6 +29,25 @@ TEST_CASE("parse_phantom: optional label is picked up when present") {
     CHECK(p->label == "scan-host-1.2.3.4");
 }
 
+TEST_CASE("parse_phantom: optional source tag is picked up when present") {
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"source":"ollama:llama3.2:3b"})");
+    REQUIRE(p.has_value());
+    CHECK(p->source == "ollama:llama3.2:3b");
+}
+
+TEST_CASE("parse_phantom: source defaults to empty when absent") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0})");
+    REQUIRE(p.has_value());
+    CHECK(p->source.empty());
+}
+
+TEST_CASE("parse_phantom: non-string source is silently ignored") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"source":42})");
+    REQUIRE(p.has_value());
+    CHECK(p->source.empty());
+}
+
 TEST_CASE("parse_phantom: malformed json returns nullopt") {
     CHECK_FALSE(parse_phantom("not json at all").has_value());
     CHECK_FALSE(parse_phantom("{").has_value());
