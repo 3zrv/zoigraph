@@ -150,9 +150,14 @@ int main() {
     transforms.reserve(512);
 
     std::vector<zg::telemetry::Phantom> phantoms;
-    bool                             show_grid     = true;
-    bool                             post_process  = true;
-    bool                             dim_filtered  = true;  // dim non-matching nodes when a tag filter is active
+    bool                             show_grid       = true;
+    bool                             post_process    = true;
+    bool                             dim_filtered    = true;  // dim non-matching nodes when a tag filter is active
+    bool                             focus_inspector = false; // set by double-click on a node, consumed by the Inspector tab
+    // Double-click tracker (~350 ms window). Static-like state, but kept here so
+    // the picker block stays self-contained and resets are visible.
+    double                           last_node_click_t   = -100.0;
+    int                              last_node_click_idx = -1;
     RabbitHole                       rabbit;
     Bones                            bones;
 
@@ -307,6 +312,22 @@ int main() {
                     }
                 }
                 selected_node = best_idx;
+            }
+
+            // Double-click on the same node within 350 ms surfaces the
+            // Inspector tab next frame so the operator can dive into the
+            // selection without manually switching tabs. Consume the
+            // tracker on detection so a fast triple-click doesn't fire
+            // twice.
+            if (selected_node >= 0) {
+                const double t = GetTime();
+                if (selected_node == last_node_click_idx && (t - last_node_click_t) < 0.35) {
+                    focus_inspector     = true;
+                    last_node_click_idx = -1;
+                } else {
+                    last_node_click_idx = selected_node;
+                    last_node_click_t   = t;
+                }
             }
         }
 
@@ -540,7 +561,12 @@ int main() {
                                            dim_filtered, show_grid, post_process);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Inspector")) {
+            ImGuiTabItemFlags inspector_flags = ImGuiTabItemFlags_None;
+            if (focus_inspector) {
+                inspector_flags = ImGuiTabItemFlags_SetSelected;
+                focus_inspector = false;
+            }
+            if (ImGui::BeginTabItem("Inspector", nullptr, inspector_flags)) {
                 zg::ui::render_inspector_tab(session, camera, phantoms, telemetry);
                 ImGui::EndTabItem();
             }

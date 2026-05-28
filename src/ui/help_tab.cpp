@@ -6,6 +6,7 @@ namespace zg::ui {
 
 void render_help_tab() {
     ImGui::TextDisabled("LEFT-CLICK         select node");
+    ImGui::TextDisabled("DOUBLE-CLICK       select + open Inspector");
     ImGui::TextDisabled("RIGHT-DRAG         orbit");
     ImGui::TextDisabled("SHIFT+RIGHT-DRAG   pan");
     ImGui::TextDisabled("SCROLL WHEEL       zoom");
