@@ -7,8 +7,16 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <sys/types.h>
-#include <unistd.h>
+
+// Cross-platform PID for unique temp-dir naming. _getpid on Windows and
+// getpid on POSIX share the same signature.
+#if defined(_WIN32)
+    #include <process.h>
+    #define ZG_GETPID() _getpid()
+#else
+    #include <unistd.h>
+    #define ZG_GETPID() ::getpid()
+#endif
 
 namespace fs = std::filesystem;
 using namespace zg::persistence;
@@ -17,7 +25,7 @@ namespace {
 
 fs::path tmp_dir(const std::string& tag) {
     fs::path p = fs::temp_directory_path() /
-                 ("zg_ps_" + tag + "_" + std::to_string(::getpid()));
+                 ("zg_ps_" + tag + "_" + std::to_string(ZG_GETPID()));
     fs::remove_all(p);
     return p;
 }

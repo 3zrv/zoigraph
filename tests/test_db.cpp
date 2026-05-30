@@ -8,9 +8,20 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <string>
-#include <sys/types.h>
-#include <unistd.h>
+
+// Cross-platform PID for unique temp-file paths. _getpid on Windows and
+// getpid on POSIX share the same signature; this keeps the existing
+// "/tmp/zoigraph_test_<pid>.db" pattern compiling on the windows-latest
+// CI runner without dragging in <unistd.h>.
+#if defined(_WIN32)
+    #include <process.h>
+    #define ZG_GETPID() _getpid()
+#else
+    #include <unistd.h>
+    #define ZG_GETPID() ::getpid()
+#endif
 
 using zg::persistence::Database;
 using zg::persistence::StoredNode;
@@ -18,6 +29,16 @@ using zg::graph::Edge;
 
 namespace {
 bool near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
+
+// Cross-platform temp DB path. Uses std::filesystem::temp_directory_path
+// so it lands at /tmp on POSIX, %TEMP% on Windows, plus a PID + tag so
+// parallel ctest invocations don't collide.
+std::string tmp_db_path(const char* tag) {
+    namespace fs = std::filesystem;
+    return (fs::temp_directory_path()
+            / ("zoigraph_test_" + std::string(tag) + "_"
+               + std::to_string(ZG_GETPID()) + ".db")).string();
+}
 }
 
 TEST_CASE("db: schema is created on open; empty load returns false") {
@@ -219,7 +240,7 @@ TEST_CASE("db: update_node_text updates the row and keeps FTS in sync") {
 }
 
 TEST_CASE("db: persistence survives close + reopen against a real file") {
-    const std::string path = "/tmp/zoigraph_test_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("default");
     std::remove(path.c_str());
     std::remove((path + "-journal").c_str());
 
@@ -386,7 +407,7 @@ TEST_CASE("db: update_node_tier changes only the tier") {
 }
 
 TEST_CASE("db: legacy table missing new columns is migrated on open") {
-    const std::string path = "/tmp/zg_migrate_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("migrate");
     std::remove(path.c_str());
 
     // Manually create a pre-migration DB shape using raw SQLite, then open
@@ -515,7 +536,7 @@ TEST_CASE("db: update_edge on a non-existent pair is a silent no-op") {
 }
 
 TEST_CASE("db: legacy edges table missing the new columns is migrated") {
-    const std::string path = "/tmp/zg_migrate_edges_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("migrate_edges");
     std::remove(path.c_str());
 
     // Create a legacy-shape DB with only source/target/weight on edges.
@@ -576,7 +597,7 @@ TEST_CASE("db: roundtrip preserves edges with negative-looking large weights (le
 TEST_CASE("db: opening the same file twice doesn't re-migrate or corrupt data") {
     // Migration is gated on column existence; opening an already-migrated
     // file should be idempotent.
-    const std::string path = "/tmp/zg_idempotent_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("idempotent");
     std::remove(path.c_str());
 
     {
@@ -696,7 +717,7 @@ TEST_CASE("db: update_node_tags with empty vector clears all tags") {
 }
 
 TEST_CASE("db: tags survive a legacy DB without node_tags table (migration creates it)") {
-    const std::string path = "/tmp/zg_tags_migrate_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("tags_migrate");
     std::remove(path.c_str());
 
     // Legacy schema: no node_tags.
@@ -746,7 +767,7 @@ TEST_CASE("db: set_meta_double upserts (second write overwrites)") {
 }
 
 TEST_CASE("db: meta survives close + reopen against a real file") {
-    const std::string path = "/tmp/zg_meta_" + std::to_string(::getpid()) + ".db";
+    const std::string path = tmp_db_path("meta");
     std::remove(path.c_str());
 
     {
@@ -884,16 +905,16 @@ TEST_CASE("db: log_event inserts rows with kind, node_id, payload and a unix-sec
     sqlite3* raw = nullptr;
     // Open a separate connection to verify what log_event wrote. ":memory:"
     // databases are connection-private, so use a temp file path instead.
-    char tmpl[] = "/tmp/zg_db_events_XXXXXX";
-    REQUIRE(mkstemp(tmpl) >= 0);
+    const std::string path = tmp_db_path("events");
+    std::remove(path.c_str());
     {
-        Database fdb(tmpl);
+        Database fdb(path);
         fdb.log_event("phantom_spawn", 42, "{\"label\":\"alice\"}");
         fdb.log_event("phantom_pin",   42, "{\"new_id\":42}");
         fdb.log_event("bones_throw",  -1, "{\"chosen\":[1,2,3]}");
     }
 
-    REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+    REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* stmt = nullptr;
     REQUIRE(sqlite3_prepare_v2(raw,
         "SELECT ts, kind, node_id, payload FROM events ORDER BY rowid;",
@@ -929,7 +950,7 @@ TEST_CASE("db: log_event inserts rows with kind, node_id, payload and a unix-sec
     REQUIRE(sqlite3_step(stmt) == SQLITE_DONE);
     sqlite3_finalize(stmt);
     sqlite3_close(raw);
-    std::remove(tmpl);
+    std::remove(path.c_str());
 }
 
 TEST_CASE("db: deleted flag roundtrips through save/load") {
@@ -955,11 +976,11 @@ TEST_CASE("db: legacy DB without the deleted column migrates and loads with dele
     // that column, inserting a row, then opening it through Database which
     // should run the ALTER TABLE migration and leave the row with
     // deleted=false (the column's DEFAULT).
-    char tmpl[] = "/tmp/zg_db_legacy_XXXXXX";
-    REQUIRE(mkstemp(tmpl) >= 0);
+    const std::string path = tmp_db_path("legacy");
+    std::remove(path.c_str());
     {
         sqlite3* raw = nullptr;
-        REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
         const char* legacy_schema =
             "CREATE TABLE nodes ("
             "  id INTEGER PRIMARY KEY,"
@@ -975,7 +996,7 @@ TEST_CASE("db: legacy DB without the deleted column migrates and loads with dele
         sqlite3_close(raw);
     }
 
-    Database db(tmpl);  // migration runs here
+    Database db(path);  // migration runs here
     std::vector<StoredNode> out_nodes;
     std::vector<Edge>       out_edges;
     REQUIRE(db.load_graph(out_nodes, out_edges));
@@ -983,7 +1004,7 @@ TEST_CASE("db: legacy DB without the deleted column migrates and loads with dele
     CHECK(out_nodes[0].id == 42);
     CHECK_FALSE(out_nodes[0].deleted);
 
-    std::remove(tmpl);
+    std::remove(path.c_str());
 }
 
 TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
@@ -994,13 +1015,13 @@ TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
     sqlite3* raw = nullptr;
     // re-prep on a temp file so we can read events back. Skip if we're
     // running against :memory: in this test variant.
-    char tmpl[] = "/tmp/zg_db_events2_XXXXXX";
-    REQUIRE(mkstemp(tmpl) >= 0);
+    const std::string path = tmp_db_path("events2");
+    std::remove(path.c_str());
     {
-        Database fdb(tmpl);
+        Database fdb(path);
         for (int i = 0; i < 50; ++i) fdb.log_event("tick", i, "");
     }
-    REQUIRE(sqlite3_open(tmpl, &raw) == SQLITE_OK);
+    REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* stmt = nullptr;
     REQUIRE(sqlite3_prepare_v2(raw,
         "SELECT ts FROM events ORDER BY rowid;",
@@ -1017,5 +1038,5 @@ TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
     CHECK(rows == 50);
     sqlite3_finalize(stmt);
     sqlite3_close(raw);
-    std::remove(tmpl);
+    std::remove(path.c_str());
 }
