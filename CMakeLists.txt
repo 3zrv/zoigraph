@@ -57,6 +57,21 @@ target_include_directories(imgui PUBLIC
     ${imgui_src_SOURCE_DIR}
     ${imgui_src_SOURCE_DIR}/misc/cpp
 )
+# Strip ImGui's Win32-default fallback impls. We don't need them -- rlImGui
+# provides clipboard via raylib and the project doesn't use OpenURL/file-
+# dialog. The collective effect of having ALL FOUR defined is that imgui.cpp
+# skips its `#include <Windows.h>` block (line ~1250 of imgui.cpp v1.92.8),
+# which otherwise drags in symbols that the global NOGDI/NOUSER from the
+# wingdi/winuser-collision fix above have stripped, causing C2039/C3861
+# on OpenClipboard / SW_SHOWDEFAULT / etc.
+if(WIN32)
+    target_compile_definitions(imgui PRIVATE
+        IMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS
+        IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
+        IMGUI_DISABLE_DEFAULT_FILE_FUNCTIONS
+        IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+    )
+endif()
 
 # ---- rlImGui (raylib ImGui backend) ----------------------------------------
 FetchContent_Declare(

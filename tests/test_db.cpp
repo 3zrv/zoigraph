@@ -28,7 +28,7 @@ using zg::persistence::StoredNode;
 using zg::graph::Edge;
 
 namespace {
-bool near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
+bool near_eq(float a, float b) { return std::fabs(a - b) < 1e-4f; }
 
 // Cross-platform temp DB path. Uses std::filesystem::temp_directory_path
 // so it lands at /tmp on POSIX, %TEMP% on Windows, plus a PID + tag so
@@ -69,9 +69,9 @@ TEST_CASE("db: roundtrip nodes + edges + markdown content") {
     REQUIRE(out_nodes.size() == in_nodes.size());
     for (std::size_t i = 0; i < in_nodes.size(); ++i) {
         CHECK(out_nodes[i].id == in_nodes[i].id);
-        CHECK(near(out_nodes[i].position.x, in_nodes[i].position.x));
-        CHECK(near(out_nodes[i].position.y, in_nodes[i].position.y));
-        CHECK(near(out_nodes[i].position.z, in_nodes[i].position.z));
+        CHECK(near_eq(out_nodes[i].position.x, in_nodes[i].position.x));
+        CHECK(near_eq(out_nodes[i].position.y, in_nodes[i].position.y));
+        CHECK(near_eq(out_nodes[i].position.z, in_nodes[i].position.z));
         CHECK(out_nodes[i].title   == in_nodes[i].title);
         CHECK(out_nodes[i].content == in_nodes[i].content);
     }
