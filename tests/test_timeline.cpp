@@ -33,23 +33,57 @@ TEST_CASE("timeline: nodes with distinct timestamps spread across the x span") {
     CHECK(out[1].x == doctest::Approx(0.0f));
 }
 
-TEST_CASE("timeline: jitter on y stays within the configured range") {
+TEST_CASE("timeline: jitter on y AND z stays within the configured range") {
     const auto out = compute_timeline_positions(
         {100.0, 200.0, 300.0, 400.0, 500.0}, 60.0f, /*y_jitter=*/10.0f);
     REQUIRE(out.size() == 5);
     for (const auto& p : out) {
-        CHECK(p.y >= -10.0f);
-        CHECK(p.y <=  10.0f);
-        CHECK(p.z == doctest::Approx(0.0f));
+        CHECK(p.y >= -10.0f); CHECK(p.y <= 10.0f);
+        CHECK(p.z >= -10.0f); CHECK(p.z <= 10.0f);
     }
 }
 
-TEST_CASE("timeline: y jitter is deterministic per index") {
+TEST_CASE("timeline: single-node columns get z jitter too, so layout isn't flat") {
+    // Distinct timestamps so every node is its own single-node column.
+    // With y_jitter > 0, at least some nodes must have z != 0 -- otherwise
+    // the timeline view becomes a flat ribbon in the x-y plane.
+    const auto out = compute_timeline_positions(
+        {100.0, 200.0, 300.0, 400.0, 500.0}, 60.0f, /*y_jitter=*/10.0f);
+    bool any_z_nonzero = false;
+    for (const auto& p : out) {
+        if (std::fabs(p.z) > 1e-3f) { any_z_nonzero = true; break; }
+    }
+    CHECK(any_z_nonzero);
+}
+
+TEST_CASE("timeline: y and z jitter are independent (not the same value)") {
+    const auto out = compute_timeline_positions(
+        {100.0, 200.0, 300.0, 400.0, 500.0}, 60.0f, 10.0f);
+    int distinct_axes = 0;
+    for (const auto& p : out) {
+        if (std::fabs(p.y - p.z) > 1e-3f) ++distinct_axes;
+    }
+    // Most nodes should have y != z; if they were the same hash, they'd
+    // all line up on a y=z diagonal which is no better than a 1D line.
+    CHECK(distinct_axes >= 4);
+}
+
+TEST_CASE("timeline: jitter is deterministic per index in both y and z") {
     const auto a = compute_timeline_positions({100.0, 200.0, 300.0}, 60.0f, 10.0f);
     const auto b = compute_timeline_positions({100.0, 200.0, 300.0}, 60.0f, 10.0f);
     REQUIRE(a.size() == b.size());
     for (std::size_t i = 0; i < a.size(); ++i) {
         CHECK(a[i].y == doctest::Approx(b[i].y));
+        CHECK(a[i].z == doctest::Approx(b[i].z));
+    }
+}
+
+TEST_CASE("timeline: y_jitter=0 zeroes both y and z (clean axis layout when requested)") {
+    const auto out = compute_timeline_positions(
+        {100.0, 200.0, 300.0}, 60.0f, /*y_jitter=*/0.0f);
+    for (const auto& p : out) {
+        CHECK(p.y == doctest::Approx(0.0f));
+        CHECK(p.z == doctest::Approx(0.0f));
     }
 }
 
@@ -189,7 +223,8 @@ TEST_CASE("timeline: single-node-per-x columns still get the hash-based jitter")
     for (const auto& p : out) {
         CHECK(p.y >= -10.0f);
         CHECK(p.y <=  10.0f);
-        CHECK(p.z == doctest::Approx(0.0f));
+        CHECK(p.z >= -10.0f);
+        CHECK(p.z <=  10.0f);
         ys.insert(p.y);
     }
     CHECK(ys.size() >= 2);

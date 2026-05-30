@@ -15,11 +15,18 @@ namespace {
 // observations stack instead of overlapping.
 constexpr float kColumnXTolerance = 0.5f;
 
-float hash_jitter(std::size_t i, float y_jitter) {
-    const std::size_t h = std::hash<std::size_t>{}(i * 2654435761u);
+// Deterministic [-magnitude, +magnitude] jitter keyed by (i, seed).
+// Different seeds give independent jitter axes -- we use one for y and
+// one for z so single-node columns get full 3D scatter instead of a
+// flat y-only ribbon.
+float hash_jitter(std::size_t i, float magnitude, std::size_t seed) {
+    const std::size_t h = std::hash<std::size_t>{}(i * seed);
     const float frac = static_cast<float>(h & 0xFFFFu) / 65535.0f;
-    return -y_jitter + 2.0f * y_jitter * frac;
+    return -magnitude + 2.0f * magnitude * frac;
 }
+
+constexpr std::size_t kHashSeedY = 2654435761u;
+constexpr std::size_t kHashSeedZ = 1442695040u;
 
 }  // namespace
 
@@ -95,7 +102,15 @@ std::vector<Vector3> compute_timeline_positions(
         const std::size_t k = col.size();
         if (k == 1) {
             const std::size_t idx = col.front();
-            out[idx] = {xs[idx], hash_jitter(idx, y_jitter), 0.0f};
+            // Two independent hash axes -- a y-only jitter would leave
+            // single-node columns flat in the x-y plane, which is what
+            // the operator sees as a "ribbon" when their corpus has no
+            // real temporal info (every node falls in its own column).
+            out[idx] = {
+                xs[idx],
+                hash_jitter(idx, y_jitter, kHashSeedY),
+                hash_jitter(idx, y_jitter, kHashSeedZ),
+            };
             continue;
         }
         for (std::size_t slot = 0; slot < k; ++slot) {
