@@ -81,26 +81,33 @@ std::vector<Vector3> compute_timeline_positions(
         }
     }
 
-    // Pass 3: assign y per column. Single-node columns keep the legacy
-    // hash-based jitter so distinct-timestamp layouts don't all collapse
-    // onto the axis. Multi-node columns stack at deterministic slots
-    // centred on y=0 with neighbours `column_spacing` apart.
+    // Pass 3: assign (y, z) per column. Single-node columns keep the
+    // legacy y-only hash jitter so distinct-timestamp layouts don't all
+    // collapse onto the axis. Multi-node columns radiate from (0,0) in
+    // the y-z plane along a Vogel's-spiral -- golden-angle steps with
+    // radius growing as sqrt(slot) -- so the column becomes a disc, not
+    // a tall vertical line. Slot 0 always lands at the centre.
+    constexpr float kGoldenAngleRad = 2.39996322972865332f;
     for (auto& col : columns) {
-        // Re-sort by original index within the column so slot order is
-        // independent of the by_x sort stability quirks across libc++/libstdc++.
+        // Sort by original index so slot assignment is deterministic
+        // across libc++/libstdc++ stable-sort differences.
         std::sort(col.begin(), col.end());
         const std::size_t k = col.size();
         if (k == 1) {
             const std::size_t idx = col.front();
             out[idx] = {xs[idx], hash_jitter(idx, y_jitter), 0.0f};
-        } else {
-            const float center_offset = 0.5f * static_cast<float>(k - 1);
-            for (std::size_t slot = 0; slot < k; ++slot) {
-                const std::size_t idx = col[slot];
-                const float y = (static_cast<float>(slot) - center_offset)
-                                * column_spacing;
-                out[idx] = {xs[idx], y, 0.0f};
-            }
+            continue;
+        }
+        for (std::size_t slot = 0; slot < k; ++slot) {
+            const std::size_t idx    = col[slot];
+            const float       angle  = static_cast<float>(slot) * kGoldenAngleRad;
+            const float       radius = column_spacing
+                                       * std::sqrt(static_cast<float>(slot));
+            out[idx] = {
+                xs[idx],
+                radius * std::cos(angle),
+                radius * std::sin(angle),
+            };
         }
     }
     return out;
