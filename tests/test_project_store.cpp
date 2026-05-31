@@ -7,8 +7,16 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <sys/types.h>
-#include <unistd.h>
+
+// Cross-platform PID for unique temp-dir naming. _getpid on Windows and
+// getpid on POSIX share the same signature.
+#if defined(_WIN32)
+    #include <process.h>
+    #define ZG_GETPID() _getpid()
+#else
+    #include <unistd.h>
+    #define ZG_GETPID() ::getpid()
+#endif
 
 namespace fs = std::filesystem;
 using namespace zg::persistence;
@@ -17,7 +25,7 @@ namespace {
 
 fs::path tmp_dir(const std::string& tag) {
     fs::path p = fs::temp_directory_path() /
-                 ("zg_ps_" + tag + "_" + std::to_string(::getpid()));
+                 ("zg_ps_" + tag + "_" + std::to_string(ZG_GETPID()));
     fs::remove_all(p);
     return p;
 }
@@ -74,7 +82,10 @@ TEST_CASE("project_store: list_projects returns sorted *.db basenames; skips hid
 
 TEST_CASE("project_store: project_path concatenates dir + name + .db") {
     const fs::path dir = "/tmp/xyz";
-    CHECK(project_path(dir, "alpha").string() == "/tmp/xyz/alpha.db");
+    // generic_string() always uses forward slashes; .string() on Windows
+    // returns the native '\' separator so the equality would otherwise
+    // fail on the windows-latest CI runner.
+    CHECK(project_path(dir, "alpha").generic_string() == "/tmp/xyz/alpha.db");
 }
 
 TEST_CASE("project_store: write_last + read_last round-trips") {

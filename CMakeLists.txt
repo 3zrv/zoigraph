@@ -57,6 +57,27 @@ target_include_directories(imgui PUBLIC
     ${imgui_src_SOURCE_DIR}
     ${imgui_src_SOURCE_DIR}/misc/cpp
 )
+# Strip ImGui's Win32-only fallback impls for clipboard / IME / shell. We
+# don't need them -- rlImGui provides clipboard via raylib and the project
+# doesn't use OpenURL.
+#
+# DO NOT add IMGUI_DISABLE_DEFAULT_FILE_FUNCTIONS here: it removes the
+# typedef for ImFileHandle (FILE*), which ImGuiContext::LogFile (declared
+# in imgui_internal.h around line 2540) still depends on -- breaks
+# imgui.cpp's INI load/save and log code.
+#
+# With these three flags set (but FILE left enabled), imgui.cpp does include
+# <Windows.h>. That's fine: every winuser/wingdi call site that the global
+# NOGDI/NOUSER (added in 2c6129b for raylib symbol collisions) would strip
+# lives inside one of the disabled clipboard / IME / shell #ifdef blocks,
+# so the stripped symbols are never actually referenced.
+if(WIN32)
+    target_compile_definitions(imgui PRIVATE
+        IMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS
+        IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
+        IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+    )
+endif()
 
 # ---- rlImGui (raylib ImGui backend) ----------------------------------------
 FetchContent_Declare(

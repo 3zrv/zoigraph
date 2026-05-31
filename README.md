@@ -7,6 +7,13 @@ decay over a TTL. Edges carry a label, a kind, and a certainty that drives
 render alpha. Multi-project — each project is its own DB file under
 `projects/`.
 
+A built-in **LLM bridge** lets a local model (Ollama by default) propose
+phantoms about the currently-selected node — a structured trust gradient
+(node tier + edge certainty + UDP-only injection) keeps model output
+visually marked as provisional until a human pins it. All pin / decay /
+edit / delete / bones-throw events are logged into a per-project `events`
+table for downstream analysis.
+
 > Work in progress.
 
 ## Build
@@ -57,7 +64,12 @@ too — partial instrumentation breaks linking).
 | H                  | rabbit hole (3-hop fly from select) |
 | B                  | throw the bones (3 weakly-linked)   |
 | T                  | timeline collapse / restore         |
+| L                  | toggle all node titles overlay      |
 | ESC × 3            | wipe + exit                         |
+
+Node titles auto-render on the selected node + its 1-hop neighbours +
+every phantom's connection targets + the bones triple. Press **L** to
+flood the field with every non-deleted title for whole-graph navigation.
 
 The control panel has four tabs:
 
@@ -68,6 +80,10 @@ The control panel has four tabs:
   search box (jumps camera + selection to the top hit), selected-node
   editor (tier, tags, markdown content with `[[wikilinks]]`), incident-
   edges editor (label / kind / certainty), first-seen + last-touched.
+  **"ask about selection"** fires the configured LLM at the selected
+  node and lets the result land as a phantom; **"delete node..."** soft-
+  deletes (two-click arm/confirm) so the node vanishes from the field
+  without losing the pin trace in the events table.
 - **Toolbar** — create a static node, inject a phantom locally, save a
   timestamped journal entry (auto-edged from self and from the current
   selection).
@@ -79,11 +95,22 @@ A UDP listener is bound to `127.0.0.1:7777` (loopback only). Each datagram
 is parsed as one phantom-node JSON payload:
 
 ```
-{"id": 42, "x": 5.0, "y": 5.0, "z": 5.0, "label": "scan-host-1.2.3.4",
- "connections": [1, 7, 19]}
+{
+  "id": 42,
+  "x": 5.0, "y": 5.0, "z": 5.0,
+  "label": "scan-host-1.2.3.4",
+  "content": "one or two sentences of reasoning",
+  "source": "ollama:llama3.2:3b",
+  "connections": [
+    {"target": 1,  "kind": "saw-at"},
+    {"target": 19, "kind": "shell-of"}
+  ]
+}
 ```
 
-`label` and `connections` are optional. Quick test from the shell:
+Every field except `id` / `x` / `y` / `z` is optional. `connections` also
+accepts the legacy shape `[1, 7, 19]` (bare ints) — each entry becomes a
+connection with empty kind. Quick test from the shell:
 
 ```
 echo -n '{"id":42,"x":5,"y":5,"z":5,"label":"hi"}' \
@@ -92,9 +119,56 @@ echo -n '{"id":42,"x":5,"y":5,"z":5,"label":"hi"}' \
 
 The phantom appears as an additive-blended glowing wireframe sphere and
 decays to alpha 0 over a 60-second TTL. Click-to-pin promotes it to a
-permanent Static Node (writes to the DB, queues into physics, materializes
-any `connections` as real edges). Payloads are capped at 1 KiB and over-
-sized datagrams are dropped, not parsed-truncated.
+permanent Static Node at the lowest `tier="phantom"` with edges at
+`certainty="phantom"` (visibly faded until the operator promotes them in
+the inspector). Payloads are capped at 1 KiB and over-sized datagrams are
+dropped, not parsed-truncated.
+
+## LLM bridge
+
+The inspector's **"ask about selection"** button is the in-app path: it
+serialises the selected node + its spatial neighbourhood, shells out to
+`scripts/llm_phantom.py emit`, and lets the response land via the normal
+UDP listener. A 100 ms TCP probe against `127.0.0.1:11434` runs first so
+a missing Ollama daemon surfaces a red error inline rather than hanging.
+Backend hardcoded to `ollama:llama3.2:3b` for now.
+
+External agents can drip phantoms from any source:
+
+```
+python3 scripts/llm_phantom.py emit \
+    --backend ollama --model llama3.2:3b \
+    --db projects/<active>.db \
+    --anchor-id <node-id>
+```
+
+The script enforces a strict JSON schema before sending and tags every
+emission with `source="<backend>:<model>"` so the analysis can break pin
+rate down by emitter (the ceiling-vs-floor comparison between models).
+
+### Events table
+
+Every phantom lifecycle event lands in a per-project `events` table:
+
+| kind             | when                                              |
+|------------------|---------------------------------------------------|
+| `phantom_spawn`  | UDP packet parsed + added to the buffer           |
+| `phantom_pin`    | operator click-to-pin promotes to a Static Node   |
+| `phantom_decay`  | TTL expired without a pin                         |
+| `node_edit`      | inspector text-edit on title/content              |
+| `node_delete`    | inspector soft-delete                             |
+| `bones_throw`    | B key triggers a 3-node bones throw               |
+
+Dump and summarise after a session:
+
+```
+python3 scripts/export_events.py --db projects/<active>.db
+```
+
+Output includes total pin rate, time-to-pin distribution, pin-then-edit-
+within-60s rate, per-source breakdown, and a stop-criterion check (pin
+rate should sit in [5, 50] for the trust gradient to be doing real
+work).
 
 ## Tests
 
@@ -102,9 +176,14 @@ sized datagrams are dropped, not parsed-truncated.
 (cd build && ctest --output-on-failure)
 ```
 
-Fourteen doctest binaries: `forces`, `integrator`, `barnes_hut`,
+Eighteen doctest binaries: `forces`, `integrator`, `barnes_hut`,
 `graph_buffer`, `picks`, `cluster`, `timeline`, `wikilinks`, `escape_wipe`,
-`db`, `project_store`, `seed`, `phantom`, plus a placeholder sanity check.
+`db`, `project_store`, `seed`, `phantom`, `ask`, `promote`,
+`phantom_lifecycle`, `labels`, plus a placeholder sanity check.
+
+Pure-logic modules ship with doctest cases before being threaded into
+runtime code; render-loop and ImGui-bound code is exempt by design (no
+useful unit-test path without a window).
 
 ## Architecture
 
@@ -124,9 +203,12 @@ Three threads, no IPC, no fibers, no third-party concurrency lib:
    `PhantomBuffer`.
 
 Persistence is plain SQLite (with FTS5) at `projects/<name>.db`. The
-persistence layer is structured for a SQLCipher swap-in: the linked
-target is named `sqlite3` so the symbol surface stays identical when
-AES-256-GCM lands.
+schema covers `nodes` (with tier + soft-delete tombstone), `edges`
+(with label/kind/certainty), `node_tags`, `meta` (project-level
+key/value), and `events` (append-only telemetry log). The persistence
+layer is structured for a SQLCipher swap-in: the linked target is
+named `sqlite3` so the symbol surface stays identical when AES-256-GCM
+lands.
 
 ## Platforms
 
@@ -145,20 +227,26 @@ releases (`v*`) ship stripped binaries to a GitHub Release. See
 
 ```
 src/
-├── main.cpp                          # ~260-line render loop wiring
-├── app/                              # session state, hotkeys, mouse pick
+├── main.cpp                          # ~280-line render loop wiring
+├── app/                              # session state, hotkeys, render-loop glue
+│   ├── session.{h,cpp}               # per-project Session struct + open_project
+│   ├── hotkeys.{h,cpp}               # ESC/H/B/T/L key handlers
+│   ├── pick.{h,cpp}                  # mouse raypick + click-to-pin
+│   ├── promote.{h,cpp}               # pure phantom→StoredNode promotion (tested)
+│   ├── phantom_lifecycle.{h,cpp}     # per-frame spawn/decay diff (tested)
+│   └── ask.{h,cpp}                   # LLM Ask button: TCP probe + popen
 ├── graph/                            # types, thread-safe buffer, pure algos
 │   ├── graph_buffer.{h,cpp}          # mutex-guarded positions handoff
 │   ├── picks.{h,cpp}                 # weakly-connected triple picker
 │   ├── cluster.{h,cpp}               # label-propagation
-│   ├── timeline.{h,cpp}              # first_seen → 1-D timeline layout
+│   ├── timeline.{h,cpp}              # first_seen → y-z spiral disc layout
 │   └── wikilinks.{h,cpp}             # [[title]] parser
 ├── input/escape_wipe.{h,cpp}         # triple-ESC state machine
 ├── macros/                           # operator-triggered camera flies
 │   ├── rabbit_hole.{h,cpp}
 │   └── bones.{h,cpp}
 ├── persistence/                      # SQLite + per-project files
-│   ├── db.{h,cpp}                    # schema, FTS5 triggers, save/load
+│   ├── db.{h,cpp}                    # schema, FTS5 triggers, events log
 │   ├── project_store.{h,cpp}         # list / create / delete projects
 │   └── seed.{h,cpp}                  # fresh-project seed graph
 ├── physics/
@@ -172,9 +260,12 @@ src/
 │   ├── draw.{h,cpp}                  # draw_jagged_line + small helpers
 │   ├── scene.{h,cpp}                 # full 3D pass (bodies/edges/halos)
 │   ├── composite.{h,cpp}             # CRT composite + edge labels + ESC HUD
+│   ├── labels.{h,cpp}                # in-focus title set + DrawText overlay
 │   └── sizes.h                       # kNodeRadius / kPhantomRadius
 ├── telemetry/                        # Thread 3 UDP listener (POSIX + Winsock)
-│   ├── phantom*.{h,cpp}              # struct, parser, buffer
+│   ├── phantom.{h,cpp}               # Phantom + Connection structs
+│   ├── phantom_parse.{h,cpp}         # JSON → Phantom (both connection shapes)
+│   ├── phantom_buffer.{h,cpp}        # TTL-expiring shared buffer
 │   └── telemetry_thread.{h,cpp}
 └── ui/                               # ImGui tab/panel renderers
     ├── project_tab.{h,cpp}
@@ -182,6 +273,11 @@ src/
     ├── toolbar_tab.{h,cpp}
     ├── help_tab.{h,cpp}
     └── bones_panel.{h,cpp}
+
+scripts/                              # external bridge + analysis
+├── llm_phantom.py                    # backend-agnostic emit + measure harness
+├── seed_corpus_unix.py               # UNIX-history sample corpus seeder
+└── export_events.py                  # events table → CSV + pin-rate summary
 
 tests/                                # one doctest binary per .cpp
 ```
