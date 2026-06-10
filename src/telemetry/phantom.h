@@ -31,6 +31,7 @@ struct Phantom {
     std::string              source;       // optional emitter tag (e.g. "ollama:llama3.2:3b", "claude:sonnet"); empty if unspecified
     std::string              content;      // optional one-sentence reasoning from the emitter; lands as the node's markdown body on pin
     std::string              project;      // optional owning-project tag; the render loop drops phantoms tagged for another project (empty = untagged, always accepted)
+    std::string              category;     // optional operator-facing grouping tag; the CLI /filter command hides phantoms whose category doesn't match (empty = uncategorized)
 };
 
 }  // namespace zg::telemetry

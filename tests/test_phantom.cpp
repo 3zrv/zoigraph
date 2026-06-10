@@ -67,6 +67,23 @@ TEST_CASE("parse_phantom: non-string project is silently ignored") {
     CHECK(p->project.empty());
 }
 
+TEST_CASE("parse_phantom: optional category tag is picked up when present") {
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"category":"recon"})");
+    REQUIRE(p.has_value());
+    CHECK(p->category == "recon");
+}
+
+TEST_CASE("parse_phantom: category defaults to empty and ignores non-strings") {
+    const auto absent = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0})");
+    REQUIRE(absent.has_value());
+    CHECK(absent->category.empty());
+    const auto bad = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"category":12})");
+    REQUIRE(bad.has_value());
+    CHECK(bad->category.empty());
+}
+
 TEST_CASE("parse_phantom: optional content is picked up when present") {
     const auto p = parse_phantom(
         R"({"id":1,"x":0,"y":0,"z":0,"content":"a one-sentence reasoning"})");

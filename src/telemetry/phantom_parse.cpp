@@ -62,6 +62,9 @@ std::optional<Phantom> parse_phantom(std::string_view payload) {
     if (j.contains("project") && j["project"].is_string()) {
         p.project = j["project"].get<std::string>();
     }
+    if (j.contains("category") && j["category"].is_string()) {
+        p.category = j["category"].get<std::string>();
+    }
     p.spawn_time = 0.0;
     return p;
 }

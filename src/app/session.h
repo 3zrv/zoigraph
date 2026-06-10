@@ -32,6 +32,7 @@ struct Session {
 
     std::vector<std::size_t>                      cluster_ids;     // empty == no clustering active
     std::string                                   tag_filter;      // empty == no filter
+    std::string                                   phantom_filter;  // CLI /filter: only phantoms with this category render (empty == all)
     std::size_t                                   self_idx       = SIZE_MAX;
     bool                                          timeline_mode  = false;
     double                                        prev_open_ts   = 0.0;

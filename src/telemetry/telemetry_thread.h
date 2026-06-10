@@ -27,8 +27,12 @@ public:
 
     // True if the socket bound successfully at startup. Listener silently
     // gives up if the port is in use; callers can check this for surfacing
-    // in the inspector.
+    // in the inspector. Note the bind happens on the worker thread, so
+    // immediately after start() this can read false for a beat.
     bool listening() const { return listening_.load(); }
+
+    // The port this listener was constructed for (bound or not).
+    int port() const { return port_; }
 
 private:
     void run();

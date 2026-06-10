@@ -6,14 +6,16 @@
 
 namespace zg::app {
 
-// 127.0.0.1:<port> reachable via a fresh TCP handshake? Loopback connects
-// return immediately on both happy and failure paths (ECONNREFUSED if
-// nothing is listening), so a plain blocking connect doubles as a
-// millisecond-scale liveness probe -- no non-blocking + select dance
-// required for a daemon on the same host. Returns true iff connect
-// succeeds. Exposed for test_ask; LlmAsk uses it as the Ollama liveness
-// check before shelling out to a subprocess.
-bool tcp_probe_localhost(int port);
+// 127.0.0.1:<port> reachable via a fresh TCP handshake within timeout_ms?
+// Non-blocking connect + poll (select on Windows) so the probe is bounded
+// even when the SYN is silently dropped -- a full accept backlog or a
+// DROP firewall rule would park a plain blocking connect for ~2 minutes
+// of kernel retries, exactly what a liveness probe must not do. The happy
+// and refused paths still complete in microseconds on loopback. Returns
+// true iff the handshake completes within the budget. Exposed for
+// test_ask; LlmAsk uses it as the Ollama liveness check before shelling
+// out to a subprocess.
+bool tcp_probe_localhost(int port, int timeout_ms = 100);
 
 // Pull the most recent non-empty line out of captured subprocess output.
 // Used to surface the script's stderr message in the inspector when the

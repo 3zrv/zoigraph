@@ -158,6 +158,7 @@ add_library(zg_app STATIC
     src/app/ask.cpp
     src/app/promote.cpp
     src/app/phantom_lifecycle.cpp
+    src/app/settings.cpp
 )
 target_include_directories(zg_app PUBLIC src)
 target_link_libraries(zg_app PUBLIC

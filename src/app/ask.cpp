@@ -16,7 +16,10 @@
     #define ZG_PCLOSE _pclose
 #else
     #include <arpa/inet.h>
+    #include <cerrno>
+    #include <fcntl.h>
     #include <netinet/in.h>
+    #include <poll.h>
     #include <sys/socket.h>
     #include <unistd.h>
     using socket_t = int;
@@ -33,29 +36,84 @@
 
 namespace zg::app {
 
-bool tcp_probe_localhost(int port) {
+namespace {
+
+// Connect-completion logic after a non-blocking ::connect returned
+// "in progress": wait for writability up to timeout_ms, then read
+// SO_ERROR -- a writable socket signals completion, not success, and
+// ECONNREFUSED is only visible in SO_ERROR.
+bool await_connect(socket_t s, int timeout_ms) {
+#if defined(_WIN32)
+    fd_set wfds, efds;
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    FD_SET(s, &wfds);
+    FD_SET(s, &efds);  // winsock reports connect failure via exceptfds
+    timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (::select(0, nullptr, &wfds, &efds, &tv) <= 0) return false;
+    if (FD_ISSET(s, &efds)) return false;
+    int err = 0;
+    int len = sizeof(err);
+    if (::getsockopt(s, SOL_SOCKET, SO_ERROR,
+                     reinterpret_cast<char*>(&err), &len) != 0) return false;
+    return err == 0;
+#else
+    pollfd pfd{};
+    pfd.fd     = s;
+    pfd.events = POLLOUT;
+    if (::poll(&pfd, 1, timeout_ms) != 1) return false;  // timeout
+    int       err = 0;
+    socklen_t len = sizeof(err);
+    if (::getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len) != 0) return false;
+    return err == 0;
+#endif
+}
+
+bool set_nonblocking(socket_t s) {
+#if defined(_WIN32)
+    u_long nb = 1;
+    return ::ioctlsocket(s, FIONBIO, &nb) == 0;
+#else
+    const int flags = ::fcntl(s, F_GETFL, 0);
+    return flags >= 0 && ::fcntl(s, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+}
+
+bool connect_in_progress() {
+#if defined(_WIN32)
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EINPROGRESS;
+#endif
+}
+
+}  // namespace
+
+bool tcp_probe_localhost(int port, int timeout_ms) {
 #if defined(_WIN32)
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
 #endif
+    bool ok = false;
     socket_t s = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (s == kInvalidSocket) {
-#if defined(_WIN32)
-        WSACleanup();
-#endif
-        return false;
+    if (s != kInvalidSocket && set_nonblocking(s)) {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(static_cast<unsigned short>(port));
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        const int rc = ::connect(s,
+            reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (rc == 0) {
+            ok = true;  // completed synchronously (common on loopback)
+        } else if (connect_in_progress()) {
+            ok = await_connect(s, timeout_ms);
+        }
     }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<unsigned short>(port));
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    const int rc = ::connect(s,
-        reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    sock_close(s);
+    if (s != kInvalidSocket) sock_close(s);
 #if defined(_WIN32)
     WSACleanup();
 #endif
-    return rc == 0;
+    return ok;
 }
 
 std::string last_nonblank_line(const std::string& s) {

@@ -89,19 +89,36 @@ The control panel has five tabs:
   edged to the current selection), inject a phantom locally, save a
   timestamped journal entry (auto-edged from self and from the current
   selection).
-- **CLI** — claude-style slash-command prompt with scrollback. Commands:
-  `/panic` overwrites then deletes **all** project data (every
-  `projects/*.db` with WAL/SHM sidecars, the `.last` marker, and any
-  leftover legacy `zoigraph.db`) and exits; `/help` lists commands. The
-  overwrite-before-unlink is best-effort — CoW filesystems, SSD
-  wear-leveling, and journals can retain stale blocks; real at-rest
-  protection arrives with SQLCipher.
+- **CLI** — claude-style slash-command prompt with scrollback (`/help`
+  lists everything):
+  - `/node "title" [--tier t] [--to ref]` / `/edge <a> <b> [kind]` —
+    create nodes and edges; node refs are an id, an exact title, or an
+    FTS search term.
+  - `/projects`, `/project <name> [--create]`, `/info` — list/switch
+    projects and show active-project stats.
+  - `/search <terms...>` — FTS5 search; lists hits, selects + flies to
+    the top one (shares state with the inspector search box).
+  - `/phantom "label" [--n N] [--cat c]` — inject a batch of local
+    phantoms; `/phantoms [cat]` lists active ones; `/filter <cat|all>`
+    hides phantoms outside one category (visual only — hidden phantoms
+    still age, decay, and log).
+  - `/settings`, `/set <grid|crt|dim> <on|off>`, `/set port <n>` (or
+    `/port <n>`) — view + listener settings, persisted in
+    `settings.json`; a port change tears down and rebinds the UDP
+    listener in flight.
+  - `/panic` overwrites then deletes **all** project data (every
+    `projects/*.db` with WAL/SHM sidecars, the `.last` marker,
+    `settings.json`, and any leftover legacy `zoigraph.db`) and exits.
+    The overwrite-before-unlink is best-effort — CoW filesystems, SSD
+    wear-leveling, and journals can retain stale blocks; real at-rest
+    protection arrives with SQLCipher.
 - **Help** — terse cheat-sheet of every input listed above.
 
 ## Telemetry
 
-A UDP listener is bound to `127.0.0.1:7777` (loopback only). Each datagram
-is parsed as one phantom-node JSON payload:
+A UDP listener is bound to `127.0.0.1:7777` (loopback only; port
+configurable via `/set port <n>`, persisted in `settings.json`). Each
+datagram is parsed as one phantom-node JSON payload:
 
 ```
 {
@@ -110,6 +127,7 @@ is parsed as one phantom-node JSON payload:
   "label": "scan-host-1.2.3.4",
   "content": "one or two sentences of reasoning",
   "source": "ollama:llama3.2:3b",
+  "category": "recon",
   "connections": [
     {"target": 1,  "kind": "saw-at"},
     {"target": 19, "kind": "shell-of"}
@@ -185,10 +203,11 @@ work).
 (cd build && ctest --output-on-failure)
 ```
 
-Twenty doctest binaries: `forces`, `integrator`, `barnes_hut`,
+Twenty-one doctest binaries: `forces`, `integrator`, `barnes_hut`,
 `graph_buffer`, `picks`, `cluster`, `timeline`, `wikilinks`, `escape_wipe`,
-`db`, `project_store`, `secure_wipe`, `seed`, `phantom`, `ask`, `promote`,
-`phantom_lifecycle`, `labels`, `cli`, plus a placeholder sanity check.
+`db`, `project_store`, `secure_wipe`, `seed`, `settings`, `phantom`, `ask`,
+`promote`, `phantom_lifecycle`, `labels`, `cli`, plus a placeholder sanity
+check.
 
 Pure-logic modules ship with doctest cases before being threaded into
 runtime code; render-loop and ImGui-bound code is exempt by design (no
@@ -243,6 +262,7 @@ src/
 │   ├── pick.{h,cpp}                  # mouse raypick + click-to-pin
 │   ├── promote.{h,cpp}               # pure phantom→StoredNode promotion (tested)
 │   ├── phantom_lifecycle.{h,cpp}     # per-frame spawn/decay diff (tested)
+│   ├── settings.{h,cpp}              # persisted operator settings (tested)
 │   └── ask.{h,cpp}                   # LLM Ask button: TCP probe + popen
 ├── graph/                            # types, thread-safe buffer, pure algos
 │   ├── graph_buffer.{h,cpp}          # mutex-guarded positions handoff

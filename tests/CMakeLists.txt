@@ -14,6 +14,10 @@ add_executable(test_project_store test_project_store.cpp)
 target_link_libraries(test_project_store PRIVATE zg_persistence doctest::doctest)
 add_test(NAME project_store COMMAND test_project_store)
 
+add_executable(test_settings test_settings.cpp)
+target_link_libraries(test_settings PRIVATE zg_app doctest::doctest)
+add_test(NAME settings COMMAND test_settings)
+
 add_executable(test_cli test_cli.cpp)
 target_link_libraries(test_cli PRIVATE zg_ui doctest::doctest)
 add_test(NAME cli COMMAND test_cli)

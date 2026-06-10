@@ -26,6 +26,7 @@
 #include "graph/wikilinks.h"
 #include "app/clock.h"
 #include "app/hotkeys.h"
+#include "app/settings.h"
 #include "app/phantom_lifecycle.h"
 #include "app/pick.h"
 #include "app/session.h"
@@ -60,7 +61,6 @@
 
 namespace {
 
-constexpr int   kTelemetryPort  = 7777;
 constexpr float kPhantomTtl     = 60.0f;   // seconds, per directive §5.B
 
 using zg::render::kInstancingVS;
@@ -125,10 +125,19 @@ int main() {
     const std::filesystem::path kProjectsDir = "projects";
     zg::persistence::migrate_legacy_db("zoigraph.db", kProjectsDir, "default");
 
+    // Operator settings (view flags + telemetry port) persist across runs
+    // in settings.json next to projects/. Loaded before the telemetry
+    // thread so the listener binds the persisted port.
+    const std::filesystem::path kSettingsPath = "settings.json";
+    zg::app::Settings settings = zg::app::load_settings(kSettingsPath);
+
     zg::graph::GraphBuffer            buffer;
     zg::telemetry::PhantomBuffer      phantom_buffer;
-    zg::telemetry::TelemetryThread    telemetry(kTelemetryPort, phantom_buffer);
-    telemetry.start();
+    // unique_ptr (not a value) so the CLI /port command can tear the
+    // listener down and rebind a fresh one mid-flight.
+    auto telemetry = std::make_unique<zg::telemetry::TelemetryThread>(
+        settings.telemetry_port, phantom_buffer);
+    telemetry->start();
 
     // All per-project state lives in Session; aliases below let the rest of
     // main.cpp keep using the short names while open_project repopulates
@@ -141,9 +150,8 @@ int main() {
     auto& positions     = session.positions;
 
     std::vector<zg::telemetry::Phantom> phantoms;
-    bool                             show_grid        = true;
-    bool                             post_process     = true;
-    bool                             dim_filtered     = true;  // dim non-matching nodes when a tag filter is active
+    // show_grid / post_process / dim_filtered live in `settings` (persisted);
+    // show_all_labels stays ephemeral — it's a momentary overview toggle.
     bool                             show_all_labels  = false; // L toggles all-node titles overlay
     bool                             focus_inspector  = false; // set by double-click on a node, consumed by the Inspector tab
     zg::app::DoubleClickState        dbl_click;
@@ -181,6 +189,26 @@ int main() {
     // handle, then secure-wipe all project data on the way out.
     bool                             requested_panic = false;
     zg::ui::CliState                 cli;
+    zg::ui::CliDeps                  cli_deps;
+    cli_deps.session        = &session;
+    cli_deps.phantom_buffer = &phantom_buffer;
+    cli_deps.camera         = &camera;
+    cli_deps.phantoms       = &phantoms;
+    cli_deps.projects_dir   = kProjectsDir;
+    cli_deps.open_project   = open_project;
+    cli_deps.get_port       = [&settings] { return settings.telemetry_port; };
+    cli_deps.set_port       = [&](int port) {
+        telemetry->stop();
+        telemetry = std::make_unique<zg::telemetry::TelemetryThread>(
+            port, phantom_buffer);
+        telemetry->start();
+        return true;  // bind lands async on the worker; poll listening()
+    };
+    cli_deps.port_listening = [&] { return telemetry->listening(); };
+    cli_deps.settings       = &settings;
+    cli_deps.save_settings  = [&] {
+        return zg::app::save_settings(kSettingsPath, settings);
+    };
     // Window for the triple-escape exit gesture. 1.5s is forgiving enough to
     // survive OS input latency on a relaxed tap-tap-tap; tightening this much
     // under 1s starts making the gesture feel finicky.
@@ -274,16 +302,33 @@ int main() {
             }
         }
 
-        zg::app::handle_pick(session, camera, phantoms, phantom_buffer,
+        // CLI /filter: phantoms outside the selected category disappear
+        // from draw / pick / labels but stay in `phantoms`, so lifecycle
+        // telemetry and the cross-project guard keep seeing the full set
+        // (a hidden phantom still ages, decays, and logs truthfully).
+        std::vector<zg::telemetry::Phantom> filtered_phantoms;
+        if (!session.phantom_filter.empty()) {
+            for (const auto& ph : phantoms) {
+                if (ph.category == session.phantom_filter) {
+                    filtered_phantoms.push_back(ph);
+                }
+            }
+        }
+        const auto& visible_phantoms =
+            session.phantom_filter.empty() ? phantoms : filtered_phantoms;
+
+        zg::app::handle_pick(session, camera, visible_phantoms, phantom_buffer,
                              dbl_click, focus_inspector, seen_phantom_spawn);
 
-        zg::render::draw_scene_3d(session, phantoms, camera, scene_rt,
+        zg::render::draw_scene_3d(session, visible_phantoms, camera, scene_rt,
                                   node_mesh, node_material, node_material_dim,
-                                  bones, show_grid, dim_filtered, kPhantomTtl);
+                                  bones, settings.show_grid,
+                                  settings.dim_filtered, kPhantomTtl);
 
         BeginDrawing();
         ClearBackground(BLACK);
-        zg::render::composite_scene(scene_rt, crt_shader, crt_locs, post_process);
+        zg::render::composite_scene(scene_rt, crt_shader, crt_locs,
+                                    settings.post_process);
         zg::render::draw_edge_labels(session, camera);
         // Node titles for the in-focus set (selected + 1-hop + phantom
         // targets + bones triple), or every non-deleted node when L is
@@ -295,7 +340,7 @@ int main() {
         const std::vector<std::size_t>& bones_for_labels =
             bones.panel_open ? bones.chosen : empty_bones;
         const auto label_set = zg::render::compute_label_set(
-            session.selected_node, session.edges, phantoms,
+            session.selected_node, session.edges, visible_phantoms,
             bones_for_labels, session.stored_nodes, show_all_labels);
         zg::render::draw_node_labels(label_set, session.positions,
                                      session.stored_nodes, camera);
@@ -317,7 +362,9 @@ int main() {
         if (ImGui::BeginTabBar("zg_tabs")) {
             if (ImGui::BeginTabItem("Project")) {
                 zg::ui::render_project_tab(session, kProjectsDir, open_project,
-                                           dim_filtered, show_grid, post_process);
+                                           settings.dim_filtered,
+                                           settings.show_grid,
+                                           settings.post_process);
                 ImGui::EndTabItem();
             }
             ImGuiTabItemFlags inspector_flags = ImGuiTabItemFlags_None;
@@ -326,7 +373,8 @@ int main() {
                 focus_inspector = false;
             }
             if (ImGui::BeginTabItem("Inspector", nullptr, inspector_flags)) {
-                zg::ui::render_inspector_tab(session, camera, phantoms, telemetry);
+                zg::ui::render_inspector_tab(session, camera, phantoms,
+                                             *telemetry);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Toolbar")) {
@@ -334,7 +382,7 @@ int main() {
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("CLI")) {
-                if (zg::ui::render_cli_tab(cli)) requested_panic = true;
+                if (zg::ui::render_cli_tab(cli, cli_deps)) requested_panic = true;
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Help")) {
@@ -354,7 +402,7 @@ int main() {
         EndDrawing();
     }
 
-    telemetry.stop();
+    telemetry->stop();
     if (physics) physics->stop();
 
     if (requested_panic) {
@@ -366,6 +414,7 @@ int main() {
         db.reset();
         zg::persistence::panic_wipe(kProjectsDir);
         zg::persistence::secure_wipe_file("zoigraph.db");
+        zg::persistence::secure_wipe_file(kSettingsPath);
     } else {
         // Persist the converged layout for the currently-active project.
         // Just sync positions back into stored_nodes; don't rebuild ids or
@@ -381,6 +430,9 @@ int main() {
         }
         physics.reset();
         db.reset();
+        // Checkbox/CLI changes both live in `settings`; one write on the
+        // way out keeps the file current without per-frame IO.
+        zg::app::save_settings(kSettingsPath, settings);
     }
 
     UnloadRenderTexture(scene_rt);

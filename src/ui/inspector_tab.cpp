@@ -38,8 +38,13 @@ void render_inspector_tab(zg::app::Session& s,
 
     ImGui::Text("nodes    %d", static_cast<int>(positions.size()));
     ImGui::Text("edges    %d", static_cast<int>(edges.size()));
-    ImGui::Text("phantoms %d %s", static_cast<int>(phantoms.size()),
-                telemetry.listening() ? "(udp :7777)" : "(listener off)");
+    if (telemetry.listening()) {
+        ImGui::Text("phantoms %d (udp :%d)", static_cast<int>(phantoms.size()),
+                    telemetry.port());
+    } else {
+        ImGui::Text("phantoms %d (listener off)",
+                    static_cast<int>(phantoms.size()));
+    }
     ImGui::Text("fps      %d", GetFPS());
     ImGui::Separator();
 
