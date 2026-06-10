@@ -41,12 +41,14 @@
 #include "render/shaders.h"
 #include "render/sizes.h"
 #include "ui/bones_panel.h"
+#include "ui/cli_tab.h"
 #include "ui/help_tab.h"
 #include "ui/inspector_tab.h"
 #include "ui/project_tab.h"
 #include "ui/toolbar_tab.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
+#include "persistence/secure_wipe.h"
 #include "persistence/seed.h"
 #include "physics/physics_thread.h"
 #include "telemetry/phantom.h"
@@ -78,8 +80,8 @@ int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(kWidth, kHeight, "zoigraph");
     SetTargetFPS(144);
-    // Raylib defaults to ESC-to-quit; disable so the triple-escape wipe
-    // gets the keypresses instead.
+    // Raylib defaults to ESC-to-quit; disable so the triple-escape exit
+    // gesture gets the keypresses instead.
     SetExitKey(KEY_NULL);
 
     rlImGuiSetup(true);
@@ -173,20 +175,24 @@ int main() {
     };
     open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
     std::mt19937                     rabbit_rng(std::random_device{}());
-    zg::input::EscapeWipe            esc_wipe;
+    zg::input::EscapeWipe            esc_exit;  // ESC x3 -> clean exit
     bool                             requested_exit = false;
-    // Window for the triple-escape wipe. 1.5s is forgiving enough to survive
-    // OS input latency on a relaxed tap-tap-tap; tightening this much under
-    // 1s starts making the gesture feel finicky.
-    constexpr double                 kWipeWindow = 1.5;
+    // Set by the CLI /panic command: skip the layout save, close every DB
+    // handle, then secure-wipe all project data on the way out.
+    bool                             requested_panic = false;
+    zg::ui::CliState                 cli;
+    // Window for the triple-escape exit gesture. 1.5s is forgiving enough to
+    // survive OS input latency on a relaxed tap-tap-tap; tightening this much
+    // under 1s starts making the gesture feel finicky.
+    constexpr double                 kEscWindow = 1.5;
 
-    while (!WindowShouldClose() && !requested_exit) {
+    while (!WindowShouldClose() && !requested_exit && !requested_panic) {
         if (IsWindowResized()) {
             UnloadRenderTexture(scene_rt);
             scene_rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
         }
 
-        zg::app::handle_hotkeys(session, camera, esc_wipe, kWipeWindow,
+        zg::app::handle_hotkeys(session, camera, esc_exit, kEscWindow,
                                 rabbit, bones, rabbit_rng, requested_exit,
                                 show_all_labels);
 
@@ -194,6 +200,33 @@ int main() {
         // doesn't clobber operator edits to label / kind / certainty.
         buffer.snapshot(positions);
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
+
+        // Cross-project guard: phantoms tagged for another project are
+        // dropped BEFORE the spawn diff ever sees them. An Ask launched in
+        // project A can land over UDP after the operator switched to B —
+        // pinning it there would materialize edges against the wrong graph
+        // and pollute B's events table. Untagged phantoms pass (legacy /
+        // local senders). Reverse order so erase doesn't shift the
+        // remaining indices.
+        {
+            const auto foreign = zg::app::foreign_phantom_indices(
+                phantoms, session.current_project);
+            for (auto it = foreign.rbegin(); it != foreign.rend(); ++it) {
+                const auto& ph = phantoms[*it];
+                if (db) {
+                    nlohmann::json p = {
+                        {"phantom_id",      ph.id},
+                        {"phantom_project", ph.project},
+                        {"active_project",  session.current_project},
+                        {"source",          ph.source},
+                    };
+                    db->log_event("phantom_drop", -1, p.dump());
+                }
+                phantom_buffer.remove(ph.id);
+                phantoms.erase(phantoms.begin()
+                               + static_cast<std::ptrdiff_t>(*it));
+            }
+        }
 
         // Phantom lifecycle telemetry. Project-switch detection
         // first: if the active project changed, drop the tracker without
@@ -300,6 +333,10 @@ int main() {
                 zg::ui::render_toolbar_tab(session, phantom_buffer);
                 ImGui::EndTabItem();
             }
+            if (ImGui::BeginTabItem("CLI")) {
+                if (zg::ui::render_cli_tab(cli)) requested_panic = true;
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem("Help")) {
                 zg::ui::render_help_tab();
                 ImGui::EndTabItem();
@@ -312,7 +349,7 @@ int main() {
 
         rlImGuiEnd();
 
-        zg::render::draw_esc_hud(esc_wipe, kWipeWindow);
+        zg::render::draw_esc_hud(esc_exit, kEscWindow);
 
         EndDrawing();
     }
@@ -320,20 +357,31 @@ int main() {
     telemetry.stop();
     if (physics) physics->stop();
 
-    // Persist the converged layout for the currently-active project. Just
-    // sync positions back into stored_nodes; don't rebuild ids or shrink
-    // the vector — click-to-pin nodes are already in stored_nodes and
-    // would be lost by a naive resize+id-assign.
-    if (db) {
-        std::vector<Vector3> final_positions;
-        buffer.snapshot(final_positions);
-        for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
-            stored_nodes[i].position = final_positions[i];
+    if (requested_panic) {
+        // /panic: no layout save — release every handle so SQLite isn't
+        // holding the files open, then overwrite + delete all project data
+        // (every projects/*.db with WAL/SHM sidecars and the .last marker)
+        // plus the pre-migration legacy DB if one is still around.
+        physics.reset();
+        db.reset();
+        zg::persistence::panic_wipe(kProjectsDir);
+        zg::persistence::secure_wipe_file("zoigraph.db");
+    } else {
+        // Persist the converged layout for the currently-active project.
+        // Just sync positions back into stored_nodes; don't rebuild ids or
+        // shrink the vector — click-to-pin nodes are already in
+        // stored_nodes and would be lost by a naive resize+id-assign.
+        if (db) {
+            std::vector<Vector3> final_positions;
+            buffer.snapshot(final_positions);
+            for (std::size_t i = 0; i < final_positions.size() && i < stored_nodes.size(); ++i) {
+                stored_nodes[i].position = final_positions[i];
+            }
+            db->save_graph(stored_nodes, edges);
         }
-        db->save_graph(stored_nodes, edges);
+        physics.reset();
+        db.reset();
     }
-    physics.reset();
-    db.reset();
 
     UnloadRenderTexture(scene_rt);
     UnloadShader(crt_shader);

@@ -48,6 +48,25 @@ TEST_CASE("parse_phantom: non-string source is silently ignored") {
     CHECK(p->source.empty());
 }
 
+TEST_CASE("parse_phantom: optional project tag is picked up when present") {
+    const auto p = parse_phantom(
+        R"({"id":1,"x":0,"y":0,"z":0,"project":"corpus_unix"})");
+    REQUIRE(p.has_value());
+    CHECK(p->project == "corpus_unix");
+}
+
+TEST_CASE("parse_phantom: project defaults to empty when absent") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0})");
+    REQUIRE(p.has_value());
+    CHECK(p->project.empty());
+}
+
+TEST_CASE("parse_phantom: non-string project is silently ignored") {
+    const auto p = parse_phantom(R"({"id":1,"x":0,"y":0,"z":0,"project":7})");
+    REQUIRE(p.has_value());
+    CHECK(p->project.empty());
+}
+
 TEST_CASE("parse_phantom: optional content is picked up when present") {
     const auto p = parse_phantom(
         R"({"id":1,"x":0,"y":0,"z":0,"content":"a one-sentence reasoning"})");

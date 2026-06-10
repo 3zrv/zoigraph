@@ -30,6 +30,7 @@ struct Phantom {
     std::vector<Connection>  connections;  // optional Static Node connections (id + kind) this phantom is wired to
     std::string              source;       // optional emitter tag (e.g. "ollama:llama3.2:3b", "claude:sonnet"); empty if unspecified
     std::string              content;      // optional one-sentence reasoning from the emitter; lands as the node's markdown body on pin
+    std::string              project;      // optional owning-project tag; the render loop drops phantoms tagged for another project (empty = untagged, always accepted)
 };
 
 }  // namespace zg::telemetry

@@ -3,6 +3,7 @@
 
 #include "app/phantom_lifecycle.h"
 
+using zg::app::foreign_phantom_indices;
 using zg::app::phantom_lifecycle_diff;
 using zg::telemetry::Phantom;
 
@@ -14,6 +15,49 @@ Phantom mk(long long id, double spawn_ts) {
     p.position = {0, 0, 0};
     return p;
 }
+
+Phantom mk_proj(long long id, const char* project) {
+    Phantom p = mk(id, 0.0);
+    p.project = project;
+    return p;
+}
+}
+
+TEST_CASE("foreign_phantom_indices: untagged phantoms always pass") {
+    std::vector<Phantom> cur = {mk(1, 0.0), mk(2, 0.0)};
+    CHECK(foreign_phantom_indices(cur, "alpha").empty());
+}
+
+TEST_CASE("foreign_phantom_indices: matching project passes") {
+    std::vector<Phantom> cur = {mk_proj(1, "alpha")};
+    CHECK(foreign_phantom_indices(cur, "alpha").empty());
+}
+
+TEST_CASE("foreign_phantom_indices: mismatched project is foreign") {
+    std::vector<Phantom> cur = {mk_proj(1, "beta")};
+    const auto f = foreign_phantom_indices(cur, "alpha");
+    REQUIRE(f.size() == 1);
+    CHECK(f[0] == 0);
+}
+
+TEST_CASE("foreign_phantom_indices: empty active project drops nothing") {
+    // No project context to compare against -- be conservative, keep all.
+    std::vector<Phantom> cur = {mk_proj(1, "beta"), mk(2, 0.0)};
+    CHECK(foreign_phantom_indices(cur, "").empty());
+}
+
+TEST_CASE("foreign_phantom_indices: mixed list yields ascending indices "
+          "of only the foreign entries") {
+    std::vector<Phantom> cur = {
+        mk_proj(1, "beta"),   // foreign
+        mk(2, 0.0),           // untagged -> passes
+        mk_proj(3, "alpha"),  // matches -> passes
+        mk_proj(4, "gamma"),  // foreign
+    };
+    const auto f = foreign_phantom_indices(cur, "alpha");
+    REQUIRE(f.size() == 2);
+    CHECK(f[0] == 0);
+    CHECK(f[1] == 3);
 }
 
 TEST_CASE("phantom_lifecycle_diff: empty in, empty out") {

@@ -65,13 +65,13 @@ too — partial instrumentation breaks linking).
 | B                  | throw the bones (3 weakly-linked)   |
 | T                  | timeline collapse / restore         |
 | L                  | toggle all node titles overlay      |
-| ESC × 3            | wipe + exit                         |
+| ESC × 3            | clean exit                          |
 
 Node titles auto-render on the selected node + its 1-hop neighbours +
 every phantom's connection targets + the bones triple. Press **L** to
 flood the field with every non-deleted title for whole-graph navigation.
 
-The control panel has four tabs:
+The control panel has five tabs:
 
 - **Project** — switch / create / delete projects, tag filter (with dim-
   non-matching toggle), auto-cluster, and view flags (grid, CRT shader,
@@ -89,6 +89,13 @@ The control panel has four tabs:
   edged to the current selection), inject a phantom locally, save a
   timestamped journal entry (auto-edged from self and from the current
   selection).
+- **CLI** — claude-style slash-command prompt with scrollback. Commands:
+  `/panic` overwrites then deletes **all** project data (every
+  `projects/*.db` with WAL/SHM sidecars, the `.last` marker, and any
+  leftover legacy `zoigraph.db`) and exits; `/help` lists commands. The
+  overwrite-before-unlink is best-effort — CoW filesystems, SSD
+  wear-leveling, and journals can retain stale blocks; real at-rest
+  protection arrives with SQLCipher.
 - **Help** — terse cheat-sheet of every input listed above.
 
 ## Telemetry
@@ -178,10 +185,10 @@ work).
 (cd build && ctest --output-on-failure)
 ```
 
-Eighteen doctest binaries: `forces`, `integrator`, `barnes_hut`,
+Twenty doctest binaries: `forces`, `integrator`, `barnes_hut`,
 `graph_buffer`, `picks`, `cluster`, `timeline`, `wikilinks`, `escape_wipe`,
-`db`, `project_store`, `seed`, `phantom`, `ask`, `promote`,
-`phantom_lifecycle`, `labels`, plus a placeholder sanity check.
+`db`, `project_store`, `secure_wipe`, `seed`, `phantom`, `ask`, `promote`,
+`phantom_lifecycle`, `labels`, `cli`, plus a placeholder sanity check.
 
 Pure-logic modules ship with doctest cases before being threaded into
 runtime code; render-loop and ImGui-bound code is exempt by design (no
@@ -243,13 +250,14 @@ src/
 │   ├── cluster.{h,cpp}               # label-propagation
 │   ├── timeline.{h,cpp}              # first_seen → y-z spiral disc layout
 │   └── wikilinks.{h,cpp}             # [[title]] parser
-├── input/escape_wipe.{h,cpp}         # triple-ESC state machine
+├── input/escape_wipe.{h,cpp}         # triple-ESC-to-exit state machine
 ├── macros/                           # operator-triggered camera flies
 │   ├── rabbit_hole.{h,cpp}
 │   └── bones.{h,cpp}
 ├── persistence/                      # SQLite + per-project files
 │   ├── db.{h,cpp}                    # schema, FTS5 triggers, events log
 │   ├── project_store.{h,cpp}         # list / create / delete projects
+│   ├── secure_wipe.{h,cpp}           # /panic overwrite-then-unlink wipe
 │   └── seed.{h,cpp}                  # fresh-project seed graph
 ├── physics/
 │   ├── forces.{h,cpp}                # pure Coulomb + Hooke (unit tested)
@@ -273,6 +281,7 @@ src/
     ├── project_tab.{h,cpp}
     ├── inspector_tab.{h,cpp}
     ├── toolbar_tab.{h,cpp}
+    ├── cli_tab.{h,cpp}               # slash-command prompt (/panic, /help)
     ├── help_tab.{h,cpp}
     └── bones_panel.{h,cpp}
 

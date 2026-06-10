@@ -38,4 +38,18 @@ LifecycleDelta phantom_lifecycle_diff(
     return out;
 }
 
+std::vector<std::size_t> foreign_phantom_indices(
+    const std::vector<zg::telemetry::Phantom>& current,
+    const std::string& active_project) {
+    std::vector<std::size_t> out;
+    if (active_project.empty()) return out;
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        const auto& tag = current[i].project;
+        if (!tag.empty() && tag != active_project) {
+            out.push_back(i);
+        }
+    }
+    return out;
+}
+
 }  // namespace zg::app

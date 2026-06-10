@@ -55,8 +55,8 @@ void draw_edge_labels(const zg::app::Session& s, const Camera3D& camera) {
     }
 }
 
-void draw_esc_hud(zg::input::EscapeWipe& esc_wipe, double wipe_window) {
-    const int esc_recent = esc_wipe.count_recent(GetTime(), wipe_window);
+void draw_esc_hud(zg::input::EscapeWipe& esc_exit, double esc_window) {
+    const int esc_recent = esc_exit.count_recent(GetTime(), esc_window);
     if (esc_recent > 0 && esc_recent < 3) {
         const char* msg = TextFormat("ESC %d/3", esc_recent);
         const int   tw  = MeasureText(msg, 36);

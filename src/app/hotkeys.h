@@ -15,8 +15,8 @@ namespace zg::app {
 // Each key is gated on !ImGui::GetIO().WantTextInput so the operator
 // can type into the inspector without firing macros.
 //
-//   ESC          recorded against esc_wipe; three within wipe_window
-//                seconds sets requested_exit
+//   ESC          recorded against esc_exit; three within esc_window
+//                seconds sets requested_exit (clean exit)
 //   H            from selected_node, picks a 3-segment rabbit-hole path
 //                and starts the macro (ignored if a macro is running)
 //   B            throws the bones (3 weakly-connected nodes, smooth fly)
@@ -30,12 +30,12 @@ namespace zg::app {
 // is delegated to update_orbit_camera.
 //
 // Mutates session.{timeline_mode, selected_node, positions via physics
-// pin/unpin}, the rabbit/bones structs, esc_wipe, requested_exit,
+// pin/unpin}, the rabbit/bones structs, esc_exit, requested_exit,
 // show_all_labels, and camera.
 void handle_hotkeys(Session& session,
                     Camera3D& camera,
-                    zg::input::EscapeWipe& esc_wipe,
-                    double wipe_window,
+                    zg::input::EscapeWipe& esc_exit,
+                    double esc_window,
                     zg::macros::RabbitHole& rabbit,
                     zg::macros::Bones& bones,
                     std::mt19937& rng,

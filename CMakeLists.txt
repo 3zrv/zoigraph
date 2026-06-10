@@ -169,6 +169,7 @@ endif()
 
 # ---- ui (ImGui tab renderers) ----------------------------------------------
 add_library(zg_ui STATIC
+    src/ui/cli_tab.cpp
     src/ui/toolbar_tab.cpp
     src/ui/inspector_tab.cpp
     src/ui/help_tab.cpp
@@ -232,6 +233,7 @@ endif()
 add_library(zg_persistence STATIC
     src/persistence/db.cpp
     src/persistence/project_store.cpp
+    src/persistence/secure_wipe.cpp
     src/persistence/seed.cpp
 )
 target_include_directories(zg_persistence PUBLIC src)

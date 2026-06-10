@@ -18,8 +18,8 @@ namespace zg::app {
 
 void handle_hotkeys(Session& s,
                     Camera3D& camera,
-                    zg::input::EscapeWipe& esc_wipe,
-                    double wipe_window,
+                    zg::input::EscapeWipe& esc_exit,
+                    double esc_window,
                     zg::macros::RabbitHole& rabbit,
                     zg::macros::Bones& bones,
                     std::mt19937& rng,
@@ -33,7 +33,7 @@ void handle_hotkeys(Session& s,
     auto& selected_node = s.selected_node;
     auto& timeline_mode = s.timeline_mode;
 
-    if (IsKeyPressed(KEY_ESCAPE) && esc_wipe.record(GetTime(), wipe_window)) {
+    if (IsKeyPressed(KEY_ESCAPE) && esc_exit.record(GetTime(), esc_window)) {
         requested_exit = true;
     }
 

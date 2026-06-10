@@ -41,4 +41,17 @@ LifecycleDelta phantom_lifecycle_diff(
     const std::vector<zg::telemetry::Phantom>& current,
     double now_ts);
 
+// Ascending indices into `current` of phantoms tagged with a project
+// that is NOT the active one. Untagged phantoms (empty project field)
+// always pass -- they predate the tag or come from senders that don't
+// scope themselves. An empty `active_project` drops nothing (no
+// context to compare against). The render loop uses this to discard
+// foreign phantoms BEFORE the spawn diff runs, so an Ask launched in
+// project A that lands after a switch to project B neither renders,
+// nor logs spawn/decay events, nor becomes pinnable into the wrong
+// graph.
+std::vector<std::size_t> foreign_phantom_indices(
+    const std::vector<zg::telemetry::Phantom>& current,
+    const std::string& active_project);
+
 }  // namespace zg::app

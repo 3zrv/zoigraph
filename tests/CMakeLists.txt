@@ -14,6 +14,14 @@ add_executable(test_project_store test_project_store.cpp)
 target_link_libraries(test_project_store PRIVATE zg_persistence doctest::doctest)
 add_test(NAME project_store COMMAND test_project_store)
 
+add_executable(test_cli test_cli.cpp)
+target_link_libraries(test_cli PRIVATE zg_ui doctest::doctest)
+add_test(NAME cli COMMAND test_cli)
+
+add_executable(test_secure_wipe test_secure_wipe.cpp)
+target_link_libraries(test_secure_wipe PRIVATE zg_persistence doctest::doctest)
+add_test(NAME secure_wipe COMMAND test_secure_wipe)
+
 add_executable(test_seed test_seed.cpp)
 target_link_libraries(test_seed PRIVATE zg_persistence doctest::doctest)
 add_test(NAME seed COMMAND test_seed)

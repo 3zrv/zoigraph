@@ -17,6 +17,7 @@ plan and stop criteria.
 import argparse
 import json
 import math
+import os
 import random
 import re
 import socket
@@ -242,12 +243,118 @@ class OllamaBackend(Backend):
         return payload.get("response", "")
 
 
-def make_backend(name: str, model: str, failure_rate: float,
+class ClaudeBackend(Backend):
+    """Calls the Anthropic Messages API. This is the phase-2 *ceiling*
+    backend (llm_bridge.md): if the trust gradient holds against the
+    strongest, most articulate output, it really holds. Requires
+    ANTHROPIC_API_KEY in the environment.
+
+    JSON enforcement uses the API's structured-output mode
+    (output_config.format with a JSON schema) -- the native equivalent
+    of Ollama's format=json hint. Assistant prefill, the old trick for
+    forcing a bare JSON object, returns 400 on current models. No
+    temperature either: sampling params are removed on Opus 4.7+ (also
+    400) -- an inherent asymmetry vs the ollama backend's 0.6, worth
+    remembering when comparing duplicate-suggestion rates across
+    backends."""
+
+    name = "claude"
+
+    # Mirrors REQUIRED_KEYS + the connection shape parse_phantom
+    # validates. The API enforces this server-side, so valid_schema_pct
+    # should be ~100 by construction -- the interesting phase-2 signal
+    # for this backend is pin rate, not JSON validity.
+    OUTPUT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "id":      {"type": "integer"},
+            "x":       {"type": "number"},
+            "y":       {"type": "number"},
+            "z":       {"type": "number"},
+            "label":   {"type": "string"},
+            "content": {"type": "string"},
+            "connections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "integer"},
+                        "kind":   {"type": "string"},
+                    },
+                    "required": ["target", "kind"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["id", "x", "y", "z", "label", "content", "connections"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, model: str, timeout: float = 60.0):
+        self.model = model
+        self.timeout = timeout
+        self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def generate(self, prompt: str) -> str:
+        if not self.api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set -- the claude backend needs "
+                "it. export ANTHROPIC_API_KEY=... and re-run.")
+        body = json.dumps({
+            "model": self.model,
+            "max_tokens": 1024,
+            "output_config": {
+                "format": {"type": "json_schema",
+                           "schema": self.OUTPUT_SCHEMA},
+            },
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body,
+            headers={
+                "Content-Type":      "application/json",
+                "x-api-key":         self.api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                payload = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode("utf-8")[:300]
+            except Exception:
+                detail = ""
+            raise RuntimeError(
+                f"Anthropic API HTTP {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Anthropic API unreachable: {e}") from e
+        return "".join(
+            b.get("text", "") for b in payload.get("content", [])
+            if b.get("type") == "text")
+
+
+# Per-backend model defaults, applied when --model is omitted.
+DEFAULT_MODELS = {
+    "ollama": "llama3.2:3b",
+    "claude": "claude-opus-4-8",
+}
+
+
+def make_backend(name: str, model: Optional[str], failure_rate: float,
                  rng: random.Random) -> Backend:
+    model = model or DEFAULT_MODELS.get(name, "")
     if name == "mock":
         return MockBackend(failure_rate=failure_rate, rng=rng)
     if name == "ollama":
         return OllamaBackend(model=model)
+    if name == "claude":
+        # Sensitivity rule (llm_bridge.md): the remote backend never sees
+        # real threat-model content -- benign corpora only.
+        print("NOTE: claude is a REMOTE backend -- benign corpora only "
+              "(llm_bridge.md sensitivity rule).", file=sys.stderr)
+        return ClaudeBackend(model=model)
     raise SystemExit(f"unknown backend: {name}")
 
 
@@ -560,7 +667,8 @@ def cmd_emit(args: argparse.Namespace) -> int:
     # local-inject counter (1'000'000+); same-microsecond emissions from
     # this one-packet-per-process script are practically impossible.
     data["id"] = int(time.time() * 1_000_000)
-    source = args.source or _source_tag(args.backend, args.model)
+    source = args.source or _source_tag(
+        args.backend, getattr(backend, "model", None) or args.model or "")
     # Normalise connections to the object shape on the way out so the
     # listener and the events table see a uniform schema regardless of
     # what the LLM happened to emit.
@@ -582,6 +690,11 @@ def cmd_emit(args: argparse.Namespace) -> int:
         "connections": norm_conns,
         "source":      source,
         "content":     data.get("content", ""),
+        # Owning-project tag (derived from the --db filename): the app
+        # drops phantoms tagged for a project other than the active one,
+        # so an Ask that lands after a project switch can't pin wrong-
+        # graph edges or pollute the wrong events table.
+        "project":     Path(args.db).stem,
     }).encode("utf-8")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.sendto(payload, (args.host, args.port))
@@ -728,9 +841,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", default="projects/default.db",
                         help="zoigraph project DB to sample nodes from")
-    common.add_argument("--backend", choices=["mock", "ollama"], default="mock")
-    common.add_argument("--model", default="llama3.2:3b",
-                        help="Ollama model tag (ignored by mock)")
+    common.add_argument("--backend", choices=["mock", "ollama", "claude"],
+                        default="mock")
+    common.add_argument("--model", default=None,
+                        help="model tag; default depends on backend "
+                             "(ollama: llama3.2:3b, claude: claude-opus-4-8; "
+                             "ignored by mock)")
     common.add_argument("--k", type=int, default=5,
                         help="anchor + k-1 spatial neighbours per prompt")
     common.add_argument("--seed", type=int, default=1)

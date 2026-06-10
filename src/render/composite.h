@@ -34,8 +34,8 @@ void composite_scene(const RenderTexture2D& scene_rt,
 void draw_edge_labels(const zg::app::Session& session, const Camera3D& camera);
 
 // Triple-Escape progress indicator. Big red "ESC n/3" in the top-right
-// while the count is non-zero and below 3 (3 fires the wipe and exits).
+// while the count is non-zero and below 3 (3 exits the app).
 // Runs after rlImGuiEnd so it sits on top of everything, ImGui included.
-void draw_esc_hud(zg::input::EscapeWipe& esc_wipe, double wipe_window);
+void draw_esc_hud(zg::input::EscapeWipe& esc_exit, double esc_window);
 
 }  // namespace zg::render

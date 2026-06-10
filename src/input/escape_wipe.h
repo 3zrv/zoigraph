@@ -4,13 +4,13 @@
 
 namespace zg::input {
 
-// Triple-Escape wipe state machine. Records each Escape press timestamp in
-// a 3-slot circular buffer; reports true on the press that completes a
-// triple within `window` seconds. Pure data + arithmetic — no globals, no
-// time source — so it's directly unit-testable with arbitrary fake clocks.
-//
-// When SQLCipher lands, the trigger is what zeros the key buffer and
-// force-closes the DB; today it just signals a clean shutdown.
+// Triple-press state machine (wired to plain Escape in hotkeys.cpp as the
+// clean-exit gesture; destructive wipes go through the CLI /panic command
+// instead, so a key fumble can never destroy data). Records each press
+// timestamp in a 3-slot circular buffer; reports true on the press that
+// completes a triple within `window` seconds. Pure data + arithmetic — no
+// globals, no time source — so it's directly unit-testable with arbitrary
+// fake clocks.
 struct EscapeWipe {
     std::array<double, 3> stamps{{-1e9, -1e9, -1e9}};
     int                   next_slot = 0;

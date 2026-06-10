@@ -15,7 +15,8 @@ void render_help_tab() {
     ImGui::TextDisabled("B KEY              throw the bones");
     ImGui::TextDisabled("T KEY              timeline collapse");
     ImGui::TextDisabled("L KEY              toggle all node titles");
-    ImGui::TextDisabled("ESC x 3            wipe + exit");
+    ImGui::TextDisabled("ESC x 3            clean exit");
+    ImGui::TextDisabled("CLI tab: /panic    wipe ALL data + exit");
 }
 
 }  // namespace zg::ui
