@@ -204,6 +204,31 @@ TEST_CASE("db: search is case-insensitive") {
     CHECK(db.search("AlPhA").size() == 1);
 }
 
+TEST_CASE("db: search excludes soft-deleted nodes (title and content)") {
+    Database db(":memory:");
+    StoredNode alive{};
+    alive.id = 1; alive.title = "alpha visible";  alive.content = "shared keyword";
+    StoredNode ghost{};
+    ghost.id = 2; ghost.title = "spectral title"; ghost.content = "shared keyword";
+    ghost.deleted = true;
+    db.save_graph({alive, ghost}, {});
+
+    // Content token present on both rows -- only the live one may surface.
+    {
+        const auto hits = db.search("shared");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0] == 1);
+    }
+
+    // Title token unique to the tombstone -- must return nothing at all.
+    CHECK(db.search("spectral").empty());
+
+    // Tombstoning the remaining live node drops it out of search too.
+    alive.deleted = true;
+    db.save_graph({alive, ghost}, {});
+    CHECK(db.search("shared").empty());
+}
+
 TEST_CASE("db: multi-token search has AND semantics") {
     Database db(":memory:");
     db.save_graph({

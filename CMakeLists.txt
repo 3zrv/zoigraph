@@ -80,11 +80,14 @@ if(WIN32)
 endif()
 
 # ---- rlImGui (raylib ImGui backend) ----------------------------------------
+# Pinned to a commit, not `main`: rlImGui publishes no version tags, and
+# floating on the branch already forced one emergency ImGui bump (1.92.x for
+# ImDrawData::Textures). This SHA is the tree the project builds against;
+# bump deliberately, together with the ImGui pin above.
 FetchContent_Declare(
     rlimgui_src
     GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
-    GIT_TAG        main
-    GIT_SHALLOW    TRUE
+    GIT_TAG        552a3ad44f130d05055e00e11e1c3f7cf45e5657
 )
 FetchContent_MakeAvailable(rlimgui_src)
 add_library(rlimgui STATIC ${rlimgui_src_SOURCE_DIR}/rlImGui.cpp)
@@ -95,6 +98,7 @@ target_link_libraries(rlimgui PUBLIC imgui raylib)
 FetchContent_Declare(
     sqlite_amalgamation
     URL https://www.sqlite.org/2024/sqlite-amalgamation-3450200.zip
+    URL_HASH SHA256=65230414820d43a6d1445d1d98cfe57e8eb9f7ac0d6a96ad6932e0647cce51db
 )
 FetchContent_MakeAvailable(sqlite_amalgamation)
 add_library(sqlite3 STATIC ${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c)
@@ -111,6 +115,7 @@ endif()
 FetchContent_Declare(
     nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
 )
 FetchContent_MakeAvailable(nlohmann_json)
 

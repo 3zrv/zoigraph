@@ -71,14 +71,20 @@ void render_project_tab(zg::app::Session& s,
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s", create_msg.c_str());
         }
 
-        // Delete-current arming. First click sets the arm flag; second
+        // Delete-current arming. First click sets the arm state; second
         // confirms. Disables itself if there's only one project left
-        // (always need at least one to be active).
-        static bool delete_armed = false;
+        // (always need at least one to be active). Armed state is keyed
+        // to the project it was armed on: switching projects mid-confirm
+        // must disarm, otherwise the confirm deletes the NEW project.
+        static std::string delete_armed_project;
+        const bool delete_armed = (delete_armed_project == current_project)
+                                  && !current_project.empty();
         const bool only_one = names.size() <= 1;
         if (only_one) ImGui::BeginDisabled();
         if (!delete_armed) {
-            if (ImGui::SmallButton("delete current...")) delete_armed = true;
+            if (ImGui::SmallButton("delete current...")) {
+                delete_armed_project = current_project;
+            }
         } else {
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
             ImGui::SameLine();
@@ -92,10 +98,10 @@ void render_project_tab(zg::app::Session& s,
                     open_project(fallback);
                     zg::persistence::delete_project(projects_dir, victim);
                 }
-                delete_armed = false;
+                delete_armed_project.clear();
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("cancel")) delete_armed = false;
+            if (ImGui::SmallButton("cancel")) delete_armed_project.clear();
         }
         if (only_one) ImGui::EndDisabled();
     }

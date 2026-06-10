@@ -152,11 +152,15 @@ int main() {
     // loop can diff each snapshot against last frame's set and emit
     // phantom_spawn / phantom_decay events into the active project DB.
     // handle_pick erases entries on a successful pin so the diff doesn't
-    // misclassify pins as decays. tracker_db pins which project DB the
+    // misclassify pins as decays. tracker_project pins which project the
     // map is associated with so a project switch resets it without
-    // logging spurious decays into the newly-opened DB.
+    // logging spurious decays into the newly-opened DB. Keyed by name,
+    // NOT by Database pointer: open_project frees the old Database and
+    // allocates a same-sized replacement, so the allocator can hand back
+    // the identical address and a pointer compare would silently miss
+    // the switch.
     std::unordered_map<long long, double> seen_phantom_spawn;
-    zg::persistence::Database*            tracker_db = nullptr;
+    std::string                           tracker_project;
 
     // The lambda captures bones / rabbit so a project switch always closes
     // the bones scratch panel and cancels any in-flight rabbit hole. The
@@ -192,17 +196,17 @@ int main() {
         phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
 
         // Phantom lifecycle telemetry. Project-switch detection
-        // first: if the DB pointer moved, drop the tracker without logging
-        // anything (those phantoms didn't really "decay" -- the operator
-        // changed contexts). Then diff: new ids -> spawn event, missing
-        // ids -> decay event (pins were already erased by handle_pick
-        // before this block runs on the next frame -- but on the SAME
-        // frame, the spawn we'd otherwise miss is also handled by adding
-        // the phantom to the tracker BEFORE the pick call. Order matters:
-        // snapshot -> spawn-diff -> pick.
-        if (db.get() != tracker_db) {
+        // first: if the active project changed, drop the tracker without
+        // logging anything (those phantoms didn't really "decay" -- the
+        // operator changed contexts). Then diff: new ids -> spawn event,
+        // missing ids -> decay event (pins were already erased by
+        // handle_pick before this block runs on the next frame -- but on
+        // the SAME frame, the spawn we'd otherwise miss is also handled by
+        // adding the phantom to the tracker BEFORE the pick call. Order
+        // matters: snapshot -> spawn-diff -> pick.
+        if (session.current_project != tracker_project) {
             seen_phantom_spawn.clear();
-            tracker_db = db.get();
+            tracker_project = session.current_project;
         }
         // Pure-logic diff in src/app/phantom_lifecycle.{h,cpp} (covered by
         // test_phantom_lifecycle); this loop just translates the delta

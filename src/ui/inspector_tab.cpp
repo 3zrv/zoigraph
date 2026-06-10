@@ -43,9 +43,9 @@ void render_inspector_tab(zg::app::Session& s,
     ImGui::Separator();
 
     // Real-time FTS5 search: on each keystroke, re-query the DB and jump
-    // camera + selection to the top hit. The DB save_graph happens on
-    // edits/shutdown, so the index reflects the on-disk state — local
-    // unsaved edits to title/content won't surface until "save to disk."
+    // camera + selection to the top hit. Node-text edits persist when the
+    // edit session ends (widget deactivation), so the index reflects text
+    // as of the last completed edit, not the keystroke in flight.
     if (ImGui::InputTextWithHint("search", "title or content", &search_query)) {
         search_hits = db->search(search_query);
         if (!search_hits.empty()) {
@@ -149,51 +149,85 @@ void render_inspector_tab(zg::app::Session& s,
         }
         ImGui::Spacing();
 
-        bool text_changed = false;
-        text_changed |= ImGui::InputText("title", &sn.title);
+        // Title/content edits mutate the in-memory node every frame (so 3D
+        // labels track live typing), but ALL side-effects -- the DB UPDATE,
+        // the node_edit event, the self->node touch-edge, wikilink
+        // materialisation, and the search refresh -- fire once per edit
+        // session, on widget deactivation. Per keystroke they were two to
+        // three fsync'd transactions a frame on the render thread, plus one
+        // node_edit row per character, which bloated the events table the
+        // phase-2 analysis reads.
+        //
+        // The pending edit is keyed to (project, node id) because the
+        // deactivation can arrive on the frame AFTER the operator clicks
+        // straight onto another node -- the flush must persist the node
+        // that was typed on, not the newly-selected one. id==index holds
+        // for stored_nodes (tombstones are never erased), so the pending
+        // id doubles as the vector index.
+        static long long   pending_edit_id = -1;
+        static std::string pending_edit_project;
+
+        bool typed = false;
+        typed |= ImGui::InputText("title", &sn.title);
+        bool edit_done = ImGui::IsItemDeactivatedAfterEdit();
         ImGui::TextDisabled("content (markdown)");
-        text_changed |= ImGui::InputTextMultiline(
+        typed |= ImGui::InputTextMultiline(
             "##content", &sn.content,
             ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 12));
-        if (text_changed) {
-            // Persist the edit immediately so search picks it up on the
-            // next keystroke; triggers keep the FTS index in sync.
-            const double now_ts = zg::app::unix_now();
-            sn.last_touched = now_ts;
-            db->update_node_text(sn.id, sn.title, sn.content, now_ts);
-            // The query may now have new hits.
-            search_hits = db->search(search_query);
+        edit_done |= ImGui::IsItemDeactivatedAfterEdit();
 
-            // Log the edit. Record only lengths -- the operator's content
-            // shouldn't leak into the telemetry log (privacy + bloat).
-            // Co-located with the touch-edge logic below so pin-then-edit
-            // analysis can join on (node_id, ts).
+        if (typed) {
+            pending_edit_id      = sn.id;
+            pending_edit_project = s.current_project;
+        }
+        // A project switch invalidates any pending edit: the old DB is
+        // closed and stored_nodes was repopulated, so there is nothing
+        // left to flush against.
+        if (pending_edit_id >= 0 && pending_edit_project != s.current_project) {
+            pending_edit_id = -1;
+        }
+
+        if (edit_done && pending_edit_id >= 0 &&
+            static_cast<std::size_t>(pending_edit_id) < stored_nodes.size()) {
+            const std::size_t en_idx = static_cast<std::size_t>(pending_edit_id);
+            auto& en = stored_nodes[en_idx];
+            pending_edit_id = -1;
+
+            const double now_ts = zg::app::unix_now();
+            en.last_touched = now_ts;
+            db->update_node_text(en.id, en.title, en.content, now_ts);
+            // The query may now have new hits.
+            if (!search_query.empty()) search_hits = db->search(search_query);
+
+            // Log the edit (one event per edit session). Record only
+            // lengths -- the operator's content shouldn't leak into the
+            // telemetry log (privacy + bloat). Co-located with the
+            // touch-edge logic below so pin-then-edit analysis can join
+            // on (node_id, ts).
             nlohmann::json p = {
-                {"node_id",     sn.id},
-                {"title_len",   sn.title.size()},
-                {"content_len", sn.content.size()},
-                {"tier",        sn.tier},
+                {"node_id",     en.id},
+                {"title_len",   en.title.size()},
+                {"content_len", en.content.size()},
+                {"tier",        en.tier},
             };
-            db->log_event("node_edit", sn.id, p.dump());
+            db->log_event("node_edit", en.id, p.dump());
 
             // Touch-edge: any operator edit on a non-self node should
             // create a record-of-attention from self -> that node.
             // certainty="hearsay" so the line renders dim and doesn't
             // visually compete with confirmed edges.
-            if (self_idx < stored_nodes.size() &&
-                self_idx != static_cast<std::size_t>(selected_node)) {
-                const std::size_t sel = static_cast<std::size_t>(selected_node);
+            if (self_idx < stored_nodes.size() && self_idx != en_idx) {
                 bool already = false;
                 for (const auto& e : edges) {
-                    if ((e.source == self_idx && e.target == sel) ||
-                        (e.source == sel && e.target == self_idx)) {
+                    if ((e.source == self_idx && e.target == en_idx) ||
+                        (e.source == en_idx && e.target == self_idx)) {
                         already = true;
                         break;
                     }
                 }
                 if (!already) {
                     const zg::graph::Edge touch{
-                        self_idx, sel, "touched", "saw-at", "hearsay"};
+                        self_idx, en_idx, "touched", "saw-at", "hearsay"};
                     edges.push_back(touch);
                     physics->enqueue_edge(touch);
                 }
@@ -204,7 +238,7 @@ void render_inspector_tab(zg::app::Session& s,
             // existing node has a matching title. Skip duplicates so
             // re-saving doesn't fan out parallel edges. Edge persists
             // via the explicit save button or shutdown save.
-            const auto refs = zg::graph::extract_wikilinks(sn.content);
+            const auto refs = zg::graph::extract_wikilinks(en.content);
             for (const std::string& title : refs) {
                 if (title.empty()) continue;
                 std::size_t target_idx = SIZE_MAX;
@@ -215,18 +249,17 @@ void render_inspector_tab(zg::app::Session& s,
                     }
                 }
                 if (target_idx == SIZE_MAX) continue;
-                if (target_idx == static_cast<std::size_t>(selected_node)) continue;
-                const std::size_t src_idx = static_cast<std::size_t>(selected_node);
+                if (target_idx == en_idx) continue;
                 bool exists = false;
                 for (const auto& e : edges) {
-                    if ((e.source == src_idx && e.target == target_idx) ||
-                        (e.source == target_idx && e.target == src_idx)) {
+                    if ((e.source == en_idx && e.target == target_idx) ||
+                        (e.source == target_idx && e.target == en_idx)) {
                         exists = true;
                         break;
                     }
                 }
                 if (exists) continue;
-                const zg::graph::Edge link_edge{src_idx, target_idx};
+                const zg::graph::Edge link_edge{en_idx, target_idx};
                 edges.push_back(link_edge);
                 physics->enqueue_edge(link_edge);
             }
@@ -248,11 +281,22 @@ void render_inspector_tab(zg::app::Session& s,
         // deselects. The row stays in the DB so the events join
         // (phantom_pin -> node_delete) still finds the original pin row.
         // Self node can't be deleted -- it's structural.
-        static bool delete_armed = false;
+        //
+        // The armed state is keyed to (project, node id), not a bare bool:
+        // arming on node A and then clicking node B (or switching project)
+        // must disarm, otherwise the confirm button deletes whatever
+        // happens to be selected now.
+        static long long  delete_armed_id = -1;
+        static std::string delete_armed_project;
+        const bool delete_armed = (delete_armed_id == sn.id &&
+                                   delete_armed_project == s.current_project);
         const bool is_self = (static_cast<std::size_t>(selected_node) == self_idx);
         if (is_self) ImGui::BeginDisabled();
         if (!delete_armed) {
-            if (ImGui::SmallButton("delete node...")) delete_armed = true;
+            if (ImGui::SmallButton("delete node...")) {
+                delete_armed_id      = sn.id;
+                delete_armed_project = s.current_project;
+            }
         } else {
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1.0f), "click again to confirm");
             ImGui::SameLine();
@@ -268,11 +312,11 @@ void render_inspector_tab(zg::app::Session& s,
                     };
                     db->log_event("node_delete", sn.id, p.dump());
                 }
-                selected_node  = -1;
-                delete_armed   = false;
+                selected_node   = -1;
+                delete_armed_id = -1;
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("cancel")) delete_armed = false;
+            if (ImGui::SmallButton("cancel")) delete_armed_id = -1;
         }
         if (is_self) ImGui::EndDisabled();
 
@@ -345,8 +389,15 @@ void render_inspector_tab(zg::app::Session& s,
             ImGui::Separator();
             ImGui::Text("-> %zu  %s", other, other_title);
 
+            // Label text persists once per edit session (deactivation),
+            // matching the node-text policy above -- per-keystroke it was
+            // one UPDATE transaction per character on the render thread.
+            // Combo changes are discrete and persist immediately. A label
+            // edit orphaned by a selection change mid-typing stays in
+            // memory and rides the next save_graph.
             bool changed = false;
-            if (ImGui::InputText("label", &e.label))    changed = true;
+            ImGui::InputText("label", &e.label);
+            if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
 
             int kind_idx = 0;
             for (int k = 0; k < 6; ++k) if (e.kind == kKindValues[k]) { kind_idx = k; break; }

@@ -74,18 +74,37 @@ def summarize(events: list[dict]) -> None:
     pinned:  dict = {}   # phantom_id -> pin ts
     decayed: dict = {}   # phantom_id -> decay ts
     source_of: dict = {} # phantom_id -> source tag (from spawn payload)
+    dup_spawns = 0       # same phantom_id spawned twice -> dict overwrite
+    orphans = 0          # pin/decay with no matching spawn (cross-project
+                         # pollution or pre-instrumentation rows)
     for e in events:
         p = e["parsed"]
         if e["kind"] == "phantom_spawn":
             pid = p.get("phantom_id")
+            if pid in spawned:
+                dup_spawns += 1
             spawned[pid] = e["ts"]
             source_of[pid] = p.get("source") or "(unsourced)"
         elif e["kind"] == "phantom_pin":
-            pinned[p.get("phantom_id")] = e["ts"]
+            pid = p.get("phantom_id")
+            if pid not in spawned:
+                orphans += 1
+            pinned[pid] = e["ts"]
         elif e["kind"] == "phantom_decay":
-            decayed[p.get("phantom_id")] = e["ts"]
+            pid = p.get("phantom_id")
+            if pid not in spawned:
+                orphans += 1
+            decayed[pid] = e["ts"]
 
     n_spawned = len(spawned)
+    if dup_spawns:
+        print(f"  WARNING: {dup_spawns} duplicate phantom_id spawn(s) -- "
+              f"id collisions overwrite lifecycle tracking; every rate below "
+              f"is unreliable. Fix the emitter's id minting.", file=sys.stderr)
+    if orphans:
+        print(f"  WARNING: {orphans} pin/decay event(s) reference a "
+              f"phantom_id never spawned in this DB -- possible "
+              f"cross-project contamination.", file=sys.stderr)
     pin_rate   = (100 * len(pinned)  / n_spawned) if n_spawned else 0.0
     decay_rate = (100 * len(decayed) / n_spawned) if n_spawned else 0.0
 

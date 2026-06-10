@@ -109,6 +109,18 @@ Database::Database(const std::string& path) : db_(nullptr) {
         db_ = nullptr;
         throw std::runtime_error(msg);
     }
+    // WAL + NORMAL: readers (the Python bridge/export scripts) stop blocking
+    // writers, and per-statement fsync cost drops enormously -- log_event and
+    // the per-edit UPDATE paths run on the render thread, so the default
+    // DELETE-journal + FULL-sync combination (~2 fsyncs per implicit txn) was
+    // a frame-hitch source. NORMAL is the documented safe pairing with WAL:
+    // a crash can lose the last few commits but never corrupts. busy_timeout
+    // makes concurrent access from the bridge scripts wait briefly instead
+    // of surfacing SQLITE_BUSY as an uncaught exception mid-frame. On
+    // ":memory:" DBs the WAL pragma is a harmless no-op.
+    exec("PRAGMA journal_mode=WAL;");
+    exec("PRAGMA synchronous=NORMAL;");
+    exec("PRAGMA busy_timeout=2000;");
     exec(kSchema);
 
     // Schema migration for DBs created by earlier versions that lacked
@@ -501,8 +513,16 @@ std::vector<long long> Database::search(const std::string& query) const {
 
     std::vector<long long> ids;
     sqlite3_stmt* stmt = nullptr;
+    // Join back to nodes to exclude soft-deleted rows: tombstones stay in
+    // the table (and therefore in the FTS index) so id==index holds, but
+    // they must not be reachable through search -- the renderer, picker,
+    // and labels already skip them, and search was the one hole that could
+    // select an invisible node and fly the camera to empty space.
     if (sqlite3_prepare_v2(db_,
-            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank LIMIT 50;",
+            "SELECT nodes_fts.rowid FROM nodes_fts "
+            "JOIN nodes ON nodes.id = nodes_fts.rowid "
+            "WHERE nodes_fts MATCH ? AND nodes.deleted = 0 "
+            "ORDER BY nodes_fts.rank LIMIT 50;",
             -1, &stmt, nullptr) != SQLITE_OK) {
         throw_sqlite(db_, "prepare search");
     }
