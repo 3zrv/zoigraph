@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <ctime>
 #include <filesystem>
@@ -230,14 +231,15 @@ void render_inspector_tab(zg::app::Session& s,
                         self_idx, en_idx, "touched", "saw-at", "hearsay"};
                     edges.push_back(touch);
                     physics->enqueue_edge(touch);
+                    db->insert_edge(touch);
                 }
             }
 
             // Wikilinks: parse [[title]] occurrences out of the content
             // and materialize them as edges from this node to whichever
             // existing node has a matching title. Skip duplicates so
-            // re-saving doesn't fan out parallel edges. Edge persists
-            // via the explicit save button or shutdown save.
+            // re-saving doesn't fan out parallel edges. Edges persist
+            // immediately (single-row insert).
             const auto refs = zg::graph::extract_wikilinks(en.content);
             for (const std::string& title : refs) {
                 if (title.empty()) continue;
@@ -262,6 +264,7 @@ void render_inspector_tab(zg::app::Session& s,
                 const zg::graph::Edge link_edge{en_idx, target_idx};
                 edges.push_back(link_edge);
                 physics->enqueue_edge(link_edge);
+                db->insert_edge(link_edge);
             }
         }
 
@@ -302,7 +305,7 @@ void render_inspector_tab(zg::app::Session& s,
             ImGui::SameLine();
             if (ImGui::SmallButton("yes, delete")) {
                 sn.deleted = true;
-                db->save_graph(stored_nodes, edges);
+                db->mark_deleted(sn.id);
                 {
                     nlohmann::json p = {
                         {"node_id", sn.id},
@@ -418,6 +421,74 @@ void render_inspector_tab(zg::app::Session& s,
                 db->update_edge(e.source, e.target, e.label, e.kind, e.certainty);
             }
             ImGui::PopID();
+        }
+
+        // ---- add edge -------------------------------------------------
+        // Direct manual edge creation: type a fragment of the target's
+        // title, click a match. Complements wikilinks (which need exact
+        // titles inside markdown) and the toolbar's edge-on-create.
+        // Operator-created, so certainty="confirmed"; kind comes from the
+        // combo and is editable later in the list above.
+        ImGui::Spacing();
+        static std::string add_edge_query;
+        static int         add_edge_kind_idx = 0;
+        static std::string add_edge_msg;
+        ImGui::TextDisabled("add edge");
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::InputTextWithHint("##add_edge_q", "target title", &add_edge_query)) {
+            add_edge_msg.clear();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("##add_edge_kind", &add_edge_kind_idx, kKindLabels, 6);
+        if (!add_edge_query.empty()) {
+            const auto contains_ci = [](const std::string& hay,
+                                        const std::string& needle) {
+                const auto it = std::search(
+                    hay.begin(), hay.end(), needle.begin(), needle.end(),
+                    [](char a, char b) {
+                        return std::tolower(static_cast<unsigned char>(a)) ==
+                               std::tolower(static_cast<unsigned char>(b));
+                    });
+                return it != hay.end();
+            };
+            int shown = 0;
+            for (std::size_t k = 0; k < stored_nodes.size() && shown < 6; ++k) {
+                if (k == sel) continue;
+                if (stored_nodes[k].deleted) continue;
+                if (stored_nodes[k].title.empty()) continue;
+                if (!contains_ci(stored_nodes[k].title, add_edge_query)) continue;
+                ++shown;
+                ImGui::PushID(static_cast<int>(k));
+                if (ImGui::Selectable(stored_nodes[k].title.c_str())) {
+                    bool exists = false;
+                    for (const auto& e : edges) {
+                        if ((e.source == sel && e.target == k) ||
+                            (e.source == k && e.target == sel)) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (exists) {
+                        add_edge_msg = "already linked to " + stored_nodes[k].title;
+                    } else {
+                        const zg::graph::Edge ne{
+                            sel, k, "", kKindValues[add_edge_kind_idx], "confirmed"};
+                        edges.push_back(ne);
+                        physics->enqueue_edge(ne);
+                        db->insert_edge(ne);
+                        add_edge_msg = "edged to " + stored_nodes[k].title;
+                        add_edge_query.clear();
+                    }
+                }
+                ImGui::PopID();
+                // Clearing the query invalidates this match pass; stop.
+                if (add_edge_query.empty()) break;
+            }
+            if (shown == 0) ImGui::TextDisabled("(no matching title)");
+        }
+        if (!add_edge_msg.empty()) {
+            ImGui::TextDisabled("%s", add_edge_msg.c_str());
         }
     } else {
         ImGui::TextDisabled("selected: (none)");

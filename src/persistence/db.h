@@ -46,6 +46,15 @@ public:
     bool load_graph(std::vector<StoredNode>& nodes,
                     std::vector<graph::Edge>& edges) const;
 
+    // Incremental single-row writes for the per-click hot paths: pin,
+    // create-node, journal, soft-delete. save_graph stays the bulk path
+    // (shutdown / project switch / explicit save button); these avoid
+    // rewriting the whole DB + rebuilding FTS on every interaction. The
+    // FTS index follows via the kSchema triggers.
+    void insert_node(const StoredNode& n);     // node row + its tags, atomically
+    void insert_edge(const graph::Edge& e);    // one edge row
+    void mark_deleted(long long id);           // sets the tombstone flag
+
     // FTS5 prefix-match search across node titles + content. Returns matching
     // node ids ranked by FTS relevance, capped at a small limit. Empty query
     // (or one that sanitizes to nothing) returns no results.

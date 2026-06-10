@@ -70,10 +70,17 @@ void PhysicsThread::run() {
         const auto t0 = clock::now();
         step();
         buffer_.publish_positions(positions_);
-        // Republish edges each tick so the buffer stays consistent with the
-        // physics thread's view after enqueue_edge drains. Cost is one vector
-        // copy at the buffer-set mutex (microseconds at this scale).
-        buffer_.set_edges(edges_);
+        // Edges republish ONLY when an enqueue_edge drain changed them
+        // (operator actions: pin, wikilink, journal -- rare). The old
+        // unconditional set_edges copied three std::strings per edge at
+        // 120 Hz into a mutex the render thread contends every frame,
+        // with no steady-state reader (the app snapshots positions only;
+        // edge metadata is owned by main). The buffer's edge snapshot
+        // stays correct for anyone who does read it.
+        if (edges_dirty_) {
+            buffer_.set_edges(edges_);
+            edges_dirty_ = false;
+        }
 
         const auto elapsed = clock::now() - t0;
         if (elapsed < tick) std::this_thread::sleep_for(tick - elapsed);
@@ -170,6 +177,7 @@ void PhysicsThread::step() {
         }
         pending_additions_.clear();
 
+        if (!pending_edges_.empty()) edges_dirty_ = true;
         for (const graph::Edge& e : pending_edges_) {
             edges_.push_back(e);
         }

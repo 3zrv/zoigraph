@@ -52,9 +52,11 @@ void handle_pick(Session& s,
     if (phantom_hit >= 0) {
         // Promote: halt decay, append a Static Node carrying the phantom's
         // label as title, materialize any jagged-edge connections as real
-        // graph edges, save to disk, queue both node and edges into
-        // physics, then select. Promoted node enters the "phantom" tier
-        // (visibly distinct from confirmed Static Nodes).
+        // graph edges, persist incrementally (single-row inserts -- the
+        // full save_graph rewrite is reserved for shutdown / switch /
+        // save button), queue both node and edges into physics, then
+        // select. Promoted node enters the "phantom" tier (visibly
+        // distinct from confirmed Static Nodes).
         const auto& ph = phantoms[phantom_hit];
         const long long new_id   = static_cast<long long>(stored_nodes.size());
         const double promoted_ts = unix_now();
@@ -65,13 +67,14 @@ void handle_pick(Session& s,
         // live there; this site just consumes the result.
         auto promo = promote_phantom(ph, new_id, promoted_ts, positions.size());
         stored_nodes.push_back(std::move(promo.node));
+        db->insert_node(stored_nodes.back());
         for (const auto& e : promo.edges) {
             edges.push_back(e);
             physics->enqueue_edge(e);
+            db->insert_edge(e);
         }
 
         phantom_buffer.remove(ph.id);
-        db->save_graph(stored_nodes, edges);
         physics->enqueue_node(ph.position);
         selected_node = static_cast<int>(new_id);
 

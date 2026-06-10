@@ -204,6 +204,68 @@ TEST_CASE("db: search is case-insensitive") {
     CHECK(db.search("AlPhA").size() == 1);
 }
 
+TEST_CASE("db: insert_node + insert_edge roundtrip like save_graph") {
+    Database db(":memory:");
+    StoredNode n0{};
+    n0.id = 0; n0.position = {1.0f, 2.0f, 3.0f};
+    n0.title = "incremental alpha"; n0.content = "body zero";
+    n0.first_seen = 10.0; n0.last_touched = 20.0;
+    n0.tier = "suspected"; n0.tags = {"tag-a", "tag-b"};
+    StoredNode n1{};
+    n1.id = 1; n1.position = {4.0f, 5.0f, 6.0f};
+    n1.title = "incremental beta";
+    db.insert_node(n0);
+    db.insert_node(n1);
+    db.insert_edge({0, 1, "lbl", "knows", "hearsay"});
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 2);
+    CHECK(nodes[0].title == "incremental alpha");
+    CHECK(nodes[0].content == "body zero");
+    CHECK(nodes[0].first_seen == doctest::Approx(10.0));
+    CHECK(nodes[0].tier == "suspected");
+    REQUIRE(nodes[0].tags.size() == 2);
+    CHECK(near_eq(nodes[1].position.x, 4.0f));
+    REQUIRE(edges.size() == 1);
+    CHECK(edges[0].source == 0);
+    CHECK(edges[0].target == 1);
+    CHECK(edges[0].label == "lbl");
+    CHECK(edges[0].certainty == "hearsay");
+
+    // FTS triggers index incremental inserts with no explicit rebuild.
+    CHECK(db.search("incremental").size() == 2);
+
+    // A later save_graph (the shutdown / save-button path) over the same
+    // state must not duplicate or drop anything.
+    nodes[0].tags.push_back("tag-c");
+    db.save_graph(nodes, edges);
+    std::vector<StoredNode> nodes2;
+    std::vector<Edge>       edges2;
+    REQUIRE(db.load_graph(nodes2, edges2));
+    CHECK(nodes2.size() == 2);
+    CHECK(edges2.size() == 1);
+    CHECK(nodes2[0].tags.size() == 3);
+}
+
+TEST_CASE("db: mark_deleted sets the tombstone and drops the node from search") {
+    Database db(":memory:");
+    StoredNode n{};
+    n.id = 0; n.title = "condemned node";
+    db.insert_node(n);
+    REQUIRE(db.search("condemned").size() == 1);
+
+    db.mark_deleted(0);
+
+    std::vector<StoredNode> nodes;
+    std::vector<Edge>       edges;
+    REQUIRE(db.load_graph(nodes, edges));
+    REQUIRE(nodes.size() == 1);
+    CHECK(nodes[0].deleted);
+    CHECK(db.search("condemned").empty());
+}
+
 TEST_CASE("db: search excludes soft-deleted nodes (title and content)") {
     Database db(":memory:");
     StoredNode alive{};

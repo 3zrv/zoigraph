@@ -341,6 +341,94 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     return !nodes.empty();
 }
 
+void Database::insert_node(const StoredNode& n) {
+    exec("BEGIN IMMEDIATE;");
+    try {
+        sqlite3_stmt* ins = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT INTO nodes (id, x, y, z, title, content, "
+                "first_seen, last_touched, tier, deleted) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?);",
+                -1, &ins, nullptr) != SQLITE_OK) {
+            throw_sqlite(db_, "prepare insert_node");
+        }
+        sqlite3_bind_int64 (ins, 1, n.id);
+        sqlite3_bind_double(ins, 2, n.position.x);
+        sqlite3_bind_double(ins, 3, n.position.y);
+        sqlite3_bind_double(ins, 4, n.position.z);
+        sqlite3_bind_text  (ins, 5, n.title.c_str(),   -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text  (ins, 6, n.content.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(ins, 7, n.first_seen);
+        sqlite3_bind_double(ins, 8, n.last_touched);
+        sqlite3_bind_text  (ins, 9, n.tier.c_str(),    -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int   (ins, 10, n.deleted ? 1 : 0);
+        if (sqlite3_step(ins) != SQLITE_DONE) {
+            sqlite3_finalize(ins);
+            throw_sqlite(db_, "step insert_node");
+        }
+        sqlite3_finalize(ins);
+
+        if (!n.tags.empty()) {
+            sqlite3_stmt* tag = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                    "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?);",
+                    -1, &tag, nullptr) != SQLITE_OK) {
+                throw_sqlite(db_, "prepare insert_node tags");
+            }
+            for (const std::string& t : n.tags) {
+                sqlite3_bind_int64(tag, 1, n.id);
+                sqlite3_bind_text (tag, 2, t.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(tag) != SQLITE_DONE) {
+                    sqlite3_finalize(tag);
+                    throw_sqlite(db_, "step insert_node tags");
+                }
+                sqlite3_reset(tag);
+            }
+            sqlite3_finalize(tag);
+        }
+        exec("COMMIT;");
+    } catch (...) {
+        exec("ROLLBACK;");
+        throw;
+    }
+}
+
+void Database::insert_edge(const graph::Edge& e) {
+    sqlite3_stmt* ins = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "INSERT INTO edges (source, target, weight, label, kind, certainty) "
+            "VALUES (?,?,?,?,?,?);",
+            -1, &ins, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare insert_edge");
+    }
+    sqlite3_bind_int64 (ins, 1, static_cast<long long>(e.source));
+    sqlite3_bind_int64 (ins, 2, static_cast<long long>(e.target));
+    sqlite3_bind_double(ins, 3, 1.0);
+    sqlite3_bind_text  (ins, 4, e.label.c_str(),     -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text  (ins, 5, e.kind.c_str(),      -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text  (ins, 6, e.certainty.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(ins) != SQLITE_DONE) {
+        sqlite3_finalize(ins);
+        throw_sqlite(db_, "step insert_edge");
+    }
+    sqlite3_finalize(ins);
+}
+
+void Database::mark_deleted(long long id) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "UPDATE nodes SET deleted = 1 WHERE id = ?;",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        throw_sqlite(db_, "prepare mark_deleted");
+    }
+    sqlite3_bind_int64(stmt, 1, id);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw_sqlite(db_, "step mark_deleted");
+    }
+    sqlite3_finalize(stmt);
+}
+
 void Database::update_node_text(long long id, const std::string& title,
                                 const std::string& content, double last_touched) {
     sqlite3_stmt* stmt = nullptr;

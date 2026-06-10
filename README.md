@@ -79,12 +79,14 @@ The control panel has four tabs:
 - **Inspector** — node/edge/phantom/fps stats, FTS5-backed real-time
   search box (jumps camera + selection to the top hit), selected-node
   editor (tier, tags, markdown content with `[[wikilinks]]`), incident-
-  edges editor (label / kind / certainty), first-seen + last-touched.
+  edges editor (label / kind / certainty) plus add-edge-by-title-search,
+  first-seen + last-touched.
   **"ask about selection"** fires the configured LLM at the selected
   node and lets the result land as a phantom; **"delete node..."** soft-
   deletes (two-click arm/confirm) so the node vanishes from the field
   without losing the pin trace in the events table.
-- **Toolbar** — create a static node, inject a phantom locally, save a
+- **Toolbar** — create a static node (optionally spawned beside and
+  edged to the current selection), inject a phantom locally, save a
   timestamped journal entry (auto-edged from self and from the current
   selection).
 - **Help** — terse cheat-sheet of every input listed above.

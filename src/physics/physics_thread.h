@@ -96,6 +96,10 @@ private:
     graph::GraphBuffer&           buffer_;
     telemetry::PhantomBuffer*     phantom_buffer_;
     SimParams                     params_;
+    // Set by step() when an enqueue_edge drain mutated edges_; run()
+    // republishes to the buffer and clears it. Physics-thread-only state,
+    // no synchronization needed.
+    bool                          edges_dirty_ = false;
 
     std::atomic<bool>          running_{false};
     std::atomic<bool>          use_barnes_hut_;

@@ -38,6 +38,28 @@ void render_toolbar_tab(zg::app::Session& s,
                                                  ImGuiInputTextFlags_EnterReturnsTrue);
     if (ImGui::IsItemEdited()) tb_node_msg.clear();
     ImGui::Combo("tier##tb_node", &tb_node_tier_idx, kToolbarTiers, 3);
+
+    // Optional auto-edge to the current selection so a manually-created
+    // node doesn't have to land isolated (previously the only in-app ways
+    // to a connected node were wikilinks and the journal). Greyed out when
+    // nothing is selected. The edge is operator-created and therefore
+    // certainty="confirmed"; kind stays empty -- editable afterwards in
+    // the inspector's incident-edges list.
+    static bool tb_node_link_sel = true;
+    const bool can_link =
+        selected_node >= 0 &&
+        static_cast<std::size_t>(selected_node) < stored_nodes.size() &&
+        static_cast<std::size_t>(selected_node) < positions.size() &&
+        !stored_nodes[static_cast<std::size_t>(selected_node)].deleted;
+    if (!can_link) ImGui::BeginDisabled();
+    ImGui::Checkbox("edge to selection##tb_node", &tb_node_link_sel);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("spawn the new node next to the selected one and\n"
+                          "connect them (kind editable in the inspector).\n"
+                          "needs a selected node.");
+    }
+    if (!can_link) ImGui::EndDisabled();
+
     if (ImGui::Button("create node") || node_submitted) {
         if (tb_node_title.empty()) {
             tb_node_msg = "title is empty";
@@ -46,12 +68,24 @@ void render_toolbar_tab(zg::app::Session& s,
         } else {
             const double now_ts = zg::app::unix_now();
             const long long new_id = static_cast<long long>(stored_nodes.size());
+            const bool link = tb_node_link_sel && can_link;
             const float angle = 0.7f * static_cast<float>(new_id);
-            const Vector3 spawn{
+            Vector3 spawn{
                 8.0f * std::cos(angle),
                 0.0f,
                 8.0f * std::sin(angle),
             };
+            if (link) {
+                // Spawn beside the selected node (same offset pattern as
+                // journal entries around self) so the new spring doesn't
+                // yank it across the field on the first tick.
+                const Vector3 a = positions[static_cast<std::size_t>(selected_node)];
+                spawn = Vector3{
+                    a.x + 3.0f * std::cos(angle),
+                    a.y + 1.0f,
+                    a.z + 3.0f * std::sin(angle),
+                };
+            }
             zg::persistence::StoredNode n{};
             n.id           = new_id;
             n.position     = spawn;
@@ -62,8 +96,20 @@ void render_toolbar_tab(zg::app::Session& s,
             n.tier         = kToolbarTiers[tb_node_tier_idx];
             stored_nodes.push_back(std::move(n));
             physics->enqueue_node(spawn);
-            db->save_graph(stored_nodes, edges);
-            tb_node_msg = "added " + tb_node_title;
+            db->insert_node(stored_nodes.back());
+            if (link) {
+                const std::size_t sel = static_cast<std::size_t>(selected_node);
+                const zg::graph::Edge e{
+                    static_cast<std::size_t>(new_id), sel, "", "", "confirmed"};
+                edges.push_back(e);
+                physics->enqueue_edge(e);
+                db->insert_edge(e);
+                tb_node_msg = "added " + tb_node_title + " -> " +
+                    (stored_nodes[sel].title.empty() ? "(untitled)"
+                                                     : stored_nodes[sel].title);
+            } else {
+                tb_node_msg = "added " + tb_node_title;
+            }
             tb_node_title.clear();
         }
     }
@@ -139,6 +185,7 @@ void render_toolbar_tab(zg::app::Session& s,
             jn.tags         = {"journal"};
             stored_nodes.push_back(std::move(jn));
             physics->enqueue_node(spawn);
+            db->insert_node(stored_nodes.back());
 
             if (self_idx < stored_nodes.size()) {
                 const zg::graph::Edge e_self{
@@ -146,6 +193,7 @@ void render_toolbar_tab(zg::app::Session& s,
                     "wrote", "knows", "confirmed"};
                 edges.push_back(e_self);
                 physics->enqueue_edge(e_self);
+                db->insert_edge(e_self);
             }
             if (selected_node >= 0 &&
                 static_cast<std::size_t>(selected_node) < stored_nodes.size() &&
@@ -156,9 +204,9 @@ void render_toolbar_tab(zg::app::Session& s,
                     "concerns", "saw-at", "confirmed"};
                 edges.push_back(e_about);
                 physics->enqueue_edge(e_about);
+                db->insert_edge(e_about);
             }
 
-            db->save_graph(stored_nodes, edges);
             tb_journal_msg = "saved " + std::string(tbuf);
             tb_journal_text.clear();
         }
