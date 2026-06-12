@@ -155,6 +155,7 @@ add_library(zg_app STATIC
     src/app/session.cpp
     src/app/hotkeys.cpp
     src/app/pick.cpp
+    src/app/pin.cpp
     src/app/ask.cpp
     src/app/promote.cpp
     src/app/phantom_lifecycle.cpp

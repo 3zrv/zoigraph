@@ -16,7 +16,8 @@ void render_help_tab() {
     ImGui::TextDisabled("T KEY              timeline collapse");
     ImGui::TextDisabled("L KEY              toggle all node titles");
     ImGui::TextDisabled("ESC x 3            clean exit");
-    ImGui::TextDisabled("CLI tab            /help for commands;");
+    ImGui::TextDisabled("CLI tab            /help for commands; up/down history,");
+    ImGui::TextDisabled("                   tab completion;");
     ImGui::TextDisabled("                   /panic wipes ALL data + exits");
 }
 

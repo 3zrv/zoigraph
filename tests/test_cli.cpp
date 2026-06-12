@@ -7,13 +7,18 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "app/session.h"
 #include "persistence/db.h"
 
+using zg::ui::cli_complete;
+using zg::ui::cli_history_push;
+using zg::ui::cli_history_step;
 using zg::ui::cli_tokenize;
 using zg::ui::CliDeps;
+using zg::ui::CliState;
 using zg::ui::run_cli_command;
 
 namespace {
@@ -92,6 +97,95 @@ TEST_CASE("tokenize: empty quoted string is a real (empty) token") {
     CHECK(t[1].empty());
 }
 
+// ---- history ----------------------------------------------------------
+
+TEST_CASE("history: stepping in an empty history does nothing") {
+    CliState cli;
+    CHECK_FALSE(cli_history_step(cli, -1, "draft").has_value());
+    CHECK_FALSE(cli_history_step(cli, +1, "draft").has_value());
+}
+
+TEST_CASE("history: up walks older, stops at the oldest") {
+    CliState cli;
+    cli_history_push(cli, "/info");
+    cli_history_push(cli, "/projects");
+    auto s = cli_history_step(cli, -1, "");
+    REQUIRE(s.has_value());
+    CHECK(*s == "/projects");
+    s = cli_history_step(cli, -1, *s);
+    REQUIRE(s.has_value());
+    CHECK(*s == "/info");
+    CHECK_FALSE(cli_history_step(cli, -1, *s).has_value());  // already oldest
+}
+
+TEST_CASE("history: down past the newest restores the stashed draft") {
+    CliState cli;
+    cli_history_push(cli, "/info");
+    cli_history_step(cli, -1, "half-typed draft");
+    auto s = cli_history_step(cli, +1, "/info");
+    REQUIRE(s.has_value());
+    CHECK(*s == "half-typed draft");
+    // Back on the fresh line now; another Down is a no-op.
+    CHECK_FALSE(cli_history_step(cli, +1, *s).has_value());
+}
+
+TEST_CASE("history: push skips blanks and dedupes consecutive repeats") {
+    CliState cli;
+    cli_history_push(cli, "");
+    cli_history_push(cli, "   ");
+    CHECK(cli.history.empty());
+    cli_history_push(cli, "/info");
+    cli_history_push(cli, "/info");
+    CHECK(cli.history.size() == 1);
+    cli_history_push(cli, "/projects");
+    cli_history_push(cli, "/info");
+    CHECK(cli.history.size() == 3);  // non-consecutive repeat is kept
+}
+
+TEST_CASE("history: push resets navigation state") {
+    CliState cli;
+    cli_history_push(cli, "/info");
+    cli_history_step(cli, -1, "draft");
+    cli_history_push(cli, "/projects");
+    CHECK(cli.hist_pos == -1);
+    // Fresh navigation starts from the newest entry again.
+    auto s = cli_history_step(cli, -1, "");
+    REQUIRE(s.has_value());
+    CHECK(*s == "/projects");
+}
+
+// ---- completion -------------------------------------------------------
+
+TEST_CASE("complete: unique prefix completes with a trailing space") {
+    const auto c = cli_complete("/sea");
+    CHECK(c.completed == "/search ");
+    REQUIRE(c.candidates.size() == 1);
+    CHECK(c.candidates[0] == "/search");
+}
+
+TEST_CASE("complete: ambiguous prefix extends to the common prefix") {
+    const auto c = cli_complete("/se");
+    CHECK(c.candidates.size() >= 3);  // /search /set /settings at minimum
+    CHECK(c.completed == "/se");      // 'a' vs 't' diverge immediately
+    const auto c2 = cli_complete("/set");
+    CHECK(c2.candidates.size() == 2);  // /set /settings
+    CHECK(c2.completed == "/set");
+}
+
+TEST_CASE("complete: no match, no slash, or past the command word: no-op") {
+    CHECK(cli_complete("/zz").candidates.empty());
+    CHECK(cli_complete("/zz").completed == "/zz");
+    CHECK(cli_complete("help").candidates.empty());
+    CHECK(cli_complete("/node \"ti").candidates.empty());
+    CHECK(cli_complete("").candidates.empty());
+}
+
+TEST_CASE("complete: exact command still completes (adds the space)") {
+    const auto c = cli_complete("/panic");
+    REQUIRE(c.candidates.size() == 1);
+    CHECK(c.completed == "/panic ");
+}
+
 // ---- dispatch ---------------------------------------------------------
 
 TEST_CASE("cli: blank and whitespace-only lines are ignored") {
@@ -112,6 +206,12 @@ TEST_CASE("cli: /panic fires and echoes what it is about to do") {
 TEST_CASE("cli: surrounding whitespace doesn't defeat a command") {
     std::vector<std::string> sb;
     CHECK(run_cli_command("  /panic \t", null_deps, sb));
+}
+
+TEST_CASE("cli: /clear empties the scrollback, echo included") {
+    std::vector<std::string> sb = {"old line", "another"};
+    CHECK_FALSE(run_cli_command("/clear", null_deps, sb));
+    CHECK(sb.empty());
 }
 
 TEST_CASE("cli: /help lists /panic and never fires") {
@@ -277,6 +377,175 @@ TEST_CASE("cli: /search without a query prints usage") {
     CHECK(any_line_contains(sb, "usage:"));
 }
 
+// ---- /select + /neighbors ------------------------------------------------
+
+TEST_CASE("cli: /select resolves a ref and selects it") {
+    Fixture f;
+    f.session.positions = {Vector3{0, 0, 0}, Vector3{5, 0, 5}};
+    std::vector<std::string> sb;
+    run_cli_command("/select \"bravo site\"", f.deps, sb);
+    CHECK(f.session.selected_node == 1);
+    CHECK(any_line_contains(sb, "bravo site"));
+
+    run_cli_command("/select 0", f.deps, sb);
+    CHECK(f.session.selected_node == 0);
+}
+
+TEST_CASE("cli: /select with an unresolvable ref changes nothing") {
+    Fixture f;
+    f.session.selected_node = 1;
+    std::vector<std::string> sb;
+    run_cli_command("/select zulu", f.deps, sb);
+    CHECK(f.session.selected_node == 1);
+    CHECK(any_line_contains(sb, "no node matching"));
+}
+
+TEST_CASE("cli: /select without args prints usage") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/select", f.deps, sb);
+    CHECK(any_line_contains(sb, "usage:"));
+}
+
+TEST_CASE("cli: /neighbors lists incident edges in both directions") {
+    Fixture f;
+    f.add_node("charlie");
+    f.session.edges.push_back({0, 1, "", "knows", "confirmed"});
+    f.session.edges.push_back({2, 0, "", "", "suspected"});
+    std::vector<std::string> sb;
+    run_cli_command("/neighbors alpha", f.deps, sb);
+    CHECK(any_line_contains(sb, "bravo site"));
+    CHECK(any_line_contains(sb, "charlie"));
+    CHECK(any_line_contains(sb, "knows"));
+    CHECK(any_line_contains(sb, "2 edges"));
+}
+
+TEST_CASE("cli: /neighbors skips edges to tombstoned nodes") {
+    Fixture f;
+    f.session.edges.push_back({0, 1, "", "", "confirmed"});
+    f.session.stored_nodes[1].deleted = true;
+    std::vector<std::string> sb;
+    run_cli_command("/neighbors alpha", f.deps, sb);
+    CHECK_FALSE(any_line_contains(sb, "bravo site"));
+    CHECK(any_line_contains(sb, "no edges"));
+}
+
+TEST_CASE("cli: /neighbors on an isolated node says so") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/neighbors alpha", f.deps, sb);
+    CHECK(any_line_contains(sb, "no edges"));
+}
+
+// ---- /tier + /delete -----------------------------------------------------
+
+TEST_CASE("cli: /tier changes a node's tier") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/tier alpha suspected", f.deps, sb);
+    CHECK(f.session.stored_nodes[0].tier == "suspected");
+    CHECK(any_line_contains(sb, "alpha"));
+}
+
+TEST_CASE("cli: /tier rejects bogus tiers and the self node") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/tier alpha banana", f.deps, sb);
+    CHECK(f.session.stored_nodes[0].tier == "confirmed");
+    CHECK(any_line_contains(sb, "tier must be"));
+
+    f.session.self_idx = 0;
+    run_cli_command("/tier alpha suspected", f.deps, sb);
+    CHECK(f.session.stored_nodes[0].tier == "confirmed");
+    CHECK(any_line_contains(sb, "self node"));
+}
+
+TEST_CASE("cli: /delete without --confirm arms but deletes nothing") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/delete \"bravo site\"", f.deps, sb);
+    CHECK_FALSE(f.session.stored_nodes[1].deleted);
+    // The confirmation instruction names the RESOLVED id, so what the
+    // operator confirms is exactly what was resolved, not a re-resolution.
+    CHECK(any_line_contains(sb, "/delete 1 --confirm"));
+}
+
+TEST_CASE("cli: /delete --confirm tombstones and deselects") {
+    Fixture f;
+    f.session.selected_node = 1;
+    std::vector<std::string> sb;
+    run_cli_command("/delete 1 --confirm", f.deps, sb);
+    CHECK(f.session.stored_nodes[1].deleted);
+    CHECK(f.session.selected_node == -1);
+    CHECK(any_line_contains(sb, "deleted"));
+    // Tombstoned now: a second resolve must fail.
+    sb.clear();
+    run_cli_command("/delete 1 --confirm", f.deps, sb);
+    CHECK(any_line_contains(sb, "no node matching"));
+}
+
+TEST_CASE("cli: /delete keeps an unrelated selection") {
+    Fixture f;
+    f.session.selected_node = 0;
+    std::vector<std::string> sb;
+    run_cli_command("/delete 1 --confirm", f.deps, sb);
+    CHECK(f.session.selected_node == 0);
+}
+
+TEST_CASE("cli: /delete refuses the self node") {
+    Fixture f;
+    f.session.self_idx = 0;
+    std::vector<std::string> sb;
+    run_cli_command("/delete alpha --confirm", f.deps, sb);
+    CHECK_FALSE(f.session.stored_nodes[0].deleted);
+    CHECK(any_line_contains(sb, "self node"));
+}
+
+// ---- /ask -----------------------------------------------------------------
+
+TEST_CASE("cli: /ask fires the hook with the resolved node") {
+    Fixture f;
+    std::vector<long long> asked;
+    f.deps.ask_start = [&](long long id) { asked.push_back(id); };
+    std::vector<std::string> sb;
+    run_cli_command("/ask \"bravo site\"", f.deps, sb);
+    REQUIRE(asked.size() == 1);
+    CHECK(asked[0] == 1);
+    CHECK(any_line_contains(sb, "asking about"));
+}
+
+TEST_CASE("cli: /ask without a ref uses the selection") {
+    Fixture f;
+    f.session.selected_node = 0;
+    std::vector<long long> asked;
+    f.deps.ask_start = [&](long long id) { asked.push_back(id); };
+    std::vector<std::string> sb;
+    run_cli_command("/ask", f.deps, sb);
+    REQUIRE(asked.size() == 1);
+    CHECK(asked[0] == 0);
+}
+
+TEST_CASE("cli: /ask with nothing selected and no ref says so") {
+    Fixture f;
+    std::vector<long long> asked;
+    f.deps.ask_start = [&](long long id) { asked.push_back(id); };
+    std::vector<std::string> sb;
+    run_cli_command("/ask", f.deps, sb);
+    CHECK(asked.empty());
+    CHECK(any_line_contains(sb, "nothing selected"));
+}
+
+TEST_CASE("cli: /ask degrades politely without the hook or a match") {
+    Fixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/ask alpha", f.deps, sb);
+    CHECK(any_line_contains(sb, "ask unavailable"));
+    f.deps.ask_start = [](long long) {};
+    sb.clear();
+    run_cli_command("/ask zulu", f.deps, sb);
+    CHECK(any_line_contains(sb, "no node matching"));
+}
+
 // ---- /projects, /project, /info ----------------------------------------
 
 namespace {
@@ -377,6 +646,8 @@ struct SettingsFixture {
     CliDeps           deps;
     int               saves     = 0;
     int               port_seen = -1;
+    int               size_w    = -1;
+    int               size_h    = -1;
 
     SettingsFixture() {
         deps.settings      = &settings;
@@ -384,6 +655,7 @@ struct SettingsFixture {
         deps.get_port      = [this] { return settings.telemetry_port; };
         deps.set_port      = [this](int p) { port_seen = p; return true; };
         deps.port_listening = [] { return true; };
+        deps.set_window_size = [this](int w, int h) { size_w = w; size_h = h; };
     }
 };
 
@@ -420,6 +692,39 @@ TEST_CASE("cli: /set rejects unknown keys and bad values") {
     run_cli_command("/set grid maybe", f.deps, sb);
     CHECK(f.settings.show_grid);  // untouched
     CHECK(f.saves == 0);
+}
+
+TEST_CASE("cli: /set size resizes the window and persists") {
+    SettingsFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/set size 1600x900", f.deps, sb);
+    CHECK(f.size_w == 1600);
+    CHECK(f.size_h == 900);
+    CHECK(f.settings.window_w == 1600);
+    CHECK(f.settings.window_h == 900);
+    CHECK(f.saves == 1);
+}
+
+TEST_CASE("cli: /set size rejects malformed or out-of-range values") {
+    SettingsFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/set size banana", f.deps, sb);
+    run_cli_command("/set size 1600", f.deps, sb);
+    run_cli_command("/set size 100x100", f.deps, sb);
+    run_cli_command("/set size 1600x90000", f.deps, sb);
+    run_cli_command("/set size 1600x900x2", f.deps, sb);
+    CHECK(f.size_w == -1);
+    CHECK(f.settings.window_w == 1280);
+    CHECK(f.settings.window_h == 800);
+    CHECK(f.saves == 0);
+    CHECK(any_line_contains(sb, "WxH"));
+}
+
+TEST_CASE("cli: /settings lists the window size") {
+    SettingsFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/settings", f.deps, sb);
+    CHECK(any_line_contains(sb, "size  1280x800"));
 }
 
 TEST_CASE("cli: /set port rebinds the listener and persists") {
@@ -533,6 +838,79 @@ TEST_CASE("cli: /phantoms lists the snapshot, optionally by category") {
     CHECK(any_line_contains(sb, "alpha"));
     CHECK_FALSE(any_line_contains(sb, "bravo"));
     CHECK(any_line_contains(sb, "1 phantom in [recon]"));
+}
+
+TEST_CASE("cli: /pin promotes a phantom through the shared pin path") {
+    PhantomFixture f;
+    // promote_phantom bounds connection targets by positions.size(), same
+    // as the click path — the fixture needs the physics snapshot mirrored.
+    f.session.positions = {Vector3{0, 0, 0}, Vector3{5, 0, 5}};
+    std::unordered_map<long long, double> tracker;
+    f.deps.spawn_tracker = &tracker;
+
+    zg::telemetry::Phantom p{};
+    p.id    = 41;
+    p.label = "ghost";
+    p.connections.push_back({0, "knows"});
+    f.buffer.add(p);
+    f.snapshot = {p};
+    tracker[41] = 0.0;
+
+    std::vector<std::string> sb;
+    run_cli_command("/pin 41", f.deps, sb);
+    REQUIRE(f.session.stored_nodes.size() == 3);
+    CHECK(f.session.stored_nodes[2].title == "ghost");
+    CHECK(f.session.stored_nodes[2].tier == "phantom");   // trust gradient
+    REQUIRE(f.session.edges.size() == 1);
+    CHECK(f.session.edges[0].certainty == "phantom");
+    CHECK(f.session.selected_node == 2);
+    CHECK(f.drain().empty());                  // removed from the buffer
+    CHECK(tracker.find(41) == tracker.end());  // no decay misfire later
+    CHECK(any_line_contains(sb, "pinned"));
+}
+
+TEST_CASE("cli: /pin with an unknown id pins nothing") {
+    PhantomFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/pin 999", f.deps, sb);
+    CHECK(f.session.stored_nodes.size() == 2);
+    CHECK(any_line_contains(sb, "no active phantom"));
+    run_cli_command("/pin banana", f.deps, sb);
+    CHECK(any_line_contains(sb, "usage:"));
+}
+
+TEST_CASE("cli: /decay removes one phantom; the lifecycle diff logs it") {
+    PhantomFixture f;
+    zg::telemetry::Phantom a{};
+    a.id = 1;
+    zg::telemetry::Phantom b{};
+    b.id = 2;
+    f.buffer.add(a);
+    f.buffer.add(b);
+    f.snapshot = {a, b};
+
+    std::vector<std::string> sb;
+    run_cli_command("/decay 1", f.deps, sb);
+    const auto left = f.drain();
+    REQUIRE(left.size() == 1);
+    CHECK(left[0].id == 2);
+    CHECK(any_line_contains(sb, "dismissed"));
+
+    sb.clear();
+    run_cli_command("/decay 7", f.deps, sb);
+    CHECK(any_line_contains(sb, "no active phantom"));
+}
+
+TEST_CASE("cli: /decay all empties the buffer") {
+    PhantomFixture f;
+    zg::telemetry::Phantom a{};
+    a.id = 1;
+    f.buffer.add(a);
+    f.snapshot = {a};
+    std::vector<std::string> sb;
+    run_cli_command("/decay all", f.deps, sb);
+    CHECK(f.drain().empty());
+    CHECK(any_line_contains(sb, "dismissed 1 phantom"));
 }
 
 TEST_CASE("cli: /filter sets, reports, and clears the category filter") {

@@ -34,6 +34,8 @@ TEST_CASE("settings: missing file yields defaults") {
     CHECK(s.post_process);
     CHECK(s.dim_filtered);
     CHECK(s.telemetry_port == 7777);
+    CHECK(s.window_w == 1280);
+    CHECK(s.window_h == 800);
 }
 
 TEST_CASE("settings: save/load roundtrip preserves every field") {
@@ -43,6 +45,8 @@ TEST_CASE("settings: save/load roundtrip preserves every field") {
     s.post_process   = false;
     s.dim_filtered   = false;
     s.telemetry_port = 9999;
+    s.window_w       = 1920;
+    s.window_h       = 1080;
     REQUIRE(save_settings(p, s));
 
     const Settings r = load_settings(p);
@@ -50,6 +54,20 @@ TEST_CASE("settings: save/load roundtrip preserves every field") {
     CHECK_FALSE(r.post_process);
     CHECK_FALSE(r.dim_filtered);
     CHECK(r.telemetry_port == 9999);
+    CHECK(r.window_w == 1920);
+    CHECK(r.window_h == 1080);
+}
+
+TEST_CASE("settings: out-of-range window size falls back per axis") {
+    const auto p = scratch_file("badsize.json");
+    write_file(p, R"({"window_w": 10, "window_h": 900})");
+    Settings s = load_settings(p);
+    CHECK(s.window_w == 1280);  // below minimum -> default
+    CHECK(s.window_h == 900);   // valid axis still applies
+    write_file(p, R"({"window_w": 1600, "window_h": 100000})");
+    s = load_settings(p);
+    CHECK(s.window_w == 1600);
+    CHECK(s.window_h == 800);
 }
 
 TEST_CASE("settings: corrupt JSON yields defaults") {

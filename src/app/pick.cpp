@@ -3,15 +3,9 @@
 #include <imgui.h>
 #include <raylib.h>
 
-#include <nlohmann/json.hpp>
-
 #include <cstddef>
-#include <utility>
 
-#include "app/clock.h"
-#include "app/promote.h"
-#include "graph/types.h"
-#include "persistence/db.h"
+#include "app/pin.h"
 #include "render/sizes.h"
 
 namespace zg::app {
@@ -27,10 +21,7 @@ void handle_pick(Session& s,
         return;
     }
 
-    auto& db            = s.db;
-    auto& physics       = s.physics;
     auto& stored_nodes  = s.stored_nodes;
-    auto& edges         = s.edges;
     auto& positions     = s.positions;
     auto& selected_node = s.selected_node;
 
@@ -52,60 +43,12 @@ void handle_pick(Session& s,
     if (phantom_hit >= 0) {
         // Promote: halt decay, append a Static Node carrying the phantom's
         // label as title, materialize any jagged-edge connections as real
-        // graph edges, persist incrementally (single-row inserts -- the
-        // full save_graph rewrite is reserved for shutdown / switch /
-        // save button), queue both node and edges into physics, then
-        // select. Promoted node enters the "phantom" tier (visibly
-        // distinct from confirmed Static Nodes).
-        const auto& ph = phantoms[phantom_hit];
-        const long long new_id   = static_cast<long long>(stored_nodes.size());
-        const double promoted_ts = unix_now();
-
-        // promote_phantom is the pure-logic version of click-to-pin
-        // (covered by test_promote). Edge dropping rules and the trust-
-        // gradient defaults (node tier + edge certainty = "phantom")
-        // live there; this site just consumes the result.
-        auto promo = promote_phantom(ph, new_id, promoted_ts, positions.size());
-        stored_nodes.push_back(std::move(promo.node));
-        db->insert_node(stored_nodes.back());
-        for (const auto& e : promo.edges) {
-            edges.push_back(e);
-            physics->enqueue_edge(e);
-            db->insert_edge(e);
-        }
-
-        phantom_buffer.remove(ph.id);
-        physics->enqueue_node(ph.position);
-        selected_node = static_cast<int>(new_id);
-
-        // Log the pin and remove this id from the
-        // spawn tracker so main's per-frame diff doesn't also fire a decay
-        // event for the same phantom. time_to_pin_s is the wall-clock gap
-        // between the spawn UDP packet landing and the operator clicking;
-        // it's the headline behavioural signal for the trust-gradient
-        // test.
-        const auto spawn_it = seen_phantom_spawn.find(ph.id);
-        const double time_to_pin = (spawn_it != seen_phantom_spawn.end())
-            ? (GetTime() - spawn_it->second) : 0.0;
-        if (spawn_it != seen_phantom_spawn.end()) {
-            seen_phantom_spawn.erase(spawn_it);
-        }
-        if (db) {
-            nlohmann::json conns = nlohmann::json::array();
-            for (const auto& c : ph.connections) {
-                conns.push_back({{"target", c.target}, {"kind", c.kind}});
-            }
-            nlohmann::json payload = {
-                {"phantom_id",    ph.id},
-                {"new_node_id",   new_id},
-                {"label",         ph.label},
-                {"content",       ph.content},
-                {"connections",   conns},
-                {"time_to_pin_s", time_to_pin},
-                {"source",        ph.source},
-            };
-            db->log_event("phantom_pin", new_id, payload.dump());
-        }
+        // graph edges, persist incrementally, queue into physics, select,
+        // log the phantom_pin event. All of it lives in pin_phantom
+        // (app/pin.cpp) — shared with the CLI /pin command so the two
+        // accept paths can't drift on side-effects or event logging.
+        pin_phantom(s, phantoms[phantom_hit], phantom_buffer,
+                    seen_phantom_spawn);
     } else {
         float best_dist = 0.0f;
         int   best_idx  = -1;

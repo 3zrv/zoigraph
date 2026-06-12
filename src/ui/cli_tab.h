@@ -4,7 +4,9 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "app/session.h"
@@ -19,7 +21,42 @@ namespace zg::ui {
 struct CliState {
     std::vector<std::string> scrollback;
     std::string              input;
+
+    // Up/Down command history. `history` holds submitted lines oldest-
+    // first; `hist_pos` is the entry currently shown (-1 == editing a
+    // fresh line); `stash` preserves the unsubmitted input from before
+    // the first Up so Down-past-the-newest restores it.
+    std::vector<std::string> history;
+    int                      hist_pos = -1;
+    std::string              stash;
 };
+
+// One Up/Down step through the history. dir is -1 (older) or +1 (newer).
+// Returns the text the prompt should now show, or nullopt when the step
+// does nothing (empty history, Up at the oldest, Down on a fresh line).
+// `current` is the prompt's text right now — stashed on the first Up so
+// stepping back down past the newest entry restores it. Pure on CliState;
+// exposed for test_cli.
+std::optional<std::string> cli_history_step(CliState& cli, int dir,
+                                            const std::string& current);
+
+// Records a submitted line into the history: blanks are skipped, an exact
+// repeat of the most recent entry is deduped, and navigation state resets
+// either way. Exposed for test_cli.
+void cli_history_push(CliState& cli, const std::string& line);
+
+// Tab completion over the command table. Only the command word completes —
+// input must be a single token starting with '/'. `completed` is what the
+// prompt should now contain (== input when nothing applies): the full
+// command plus a trailing space on a unique match, the longest common
+// prefix when ambiguous. `candidates` lists every matching command so the
+// caller can print them when there's more than one. Pure; exposed for
+// test_cli.
+struct CliCompletion {
+    std::string              completed;
+    std::vector<std::string> candidates;
+};
+CliCompletion cli_complete(const std::string& input);
 
 // Everything the CLI commands reach into, assembled once in main (all
 // referents outlive the render loop). Pointers + std::function rather
@@ -38,6 +75,15 @@ struct CliDeps {
     std::function<bool()>                      port_listening;  // did the listener bind?
     zg::app::Settings*                         settings = nullptr;
     std::function<bool()>                      save_settings;   // flush settings to disk
+    std::function<void(int, int)>              set_window_size; // live-resize the OS window
+    // main's phase-2 spawn tracker (phantom id -> spawn ts). /pin passes it
+    // through to pin_phantom so the pin doesn't misfire a decay event; null
+    // degrades to time_to_pin_s = 0 (the pin itself still works).
+    std::unordered_map<long long, double>*     spawn_tracker = nullptr;
+    // Fires session.ask against a node id (main supplies the DB path).
+    // A std::function (not a direct LlmAsk::start call) so test_cli can
+    // stub it — the real thing TCP-probes Ollama and spawns a subprocess.
+    std::function<void(long long)>             ask_start;
 };
 
 // Splits a command line into tokens: whitespace-separated, with

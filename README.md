@@ -90,10 +90,17 @@ The control panel has five tabs:
   timestamped journal entry (auto-edged from self and from the current
   selection).
 - **CLI** — claude-style slash-command prompt with scrollback (`/help`
-  lists everything):
+  lists everything; Up/Down recalls history, Tab completes a command,
+  `/clear` wipes the pane):
   - `/node "title" [--tier t] [--to ref]` / `/edge <a> <b> [kind]` —
     create nodes and edges; node refs are an id, an exact title, or an
     FTS search term.
+  - `/select <ref>` / `/neighbors <ref>` — select + fly to a node; list
+    a node's incident edges with kind + certainty.
+  - `/tier <ref> <t>` — set a node's tier (confirmed/suspected/phantom).
+  - `/delete <ref> [--confirm]` — tombstone a node; the unarmed form
+    prints the exact confirming command with the resolved numeric id so
+    a fuzzy ref can't delete something other than what it showed.
   - `/projects`, `/project <name> [--create]`, `/info` — list/switch
     projects and show active-project stats.
   - `/search <terms...>` — FTS5 search; lists hits, selects + flies to
@@ -102,10 +109,17 @@ The control panel has five tabs:
     phantoms; `/phantoms [cat]` lists active ones; `/filter <cat|all>`
     hides phantoms outside one category (visual only — hidden phantoms
     still age, decay, and log).
+  - `/pin <phantom-id>` / `/decay <phantom-id|all>` — accept (promote
+    to a static node, same path + event log as click-to-pin) or dismiss
+    without pinning (logs as an ordinary decay at dismissal time).
+  - `/ask [ref]` — fire the LLM bridge at a node (defaults to the
+    selection); resulting phantoms land via the UDP listener.
   - `/settings`, `/set <grid|crt|dim> <on|off>`, `/set port <n>` (or
-    `/port <n>`) — view + listener settings, persisted in
-    `settings.json`; a port change tears down and rebinds the UDP
-    listener in flight.
+    `/port <n>`), `/set size <WxH>` — view, listener, and window-size
+    settings, persisted in `settings.json`; a port change tears down and
+    rebinds the UDP listener in flight, a size change resizes the window
+    live. The window size also follows drag-resizes: the last size is
+    captured on clean exit and restored at the next launch.
   - `/panic` overwrites then deletes **all** project data (every
     `projects/*.db` with WAL/SHM sidecars, the `.last` marker,
     `settings.json`, and any leftover legacy `zoigraph.db`) and exits.

@@ -5,18 +5,97 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#include <nlohmann/json.hpp>
+
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "app/clock.h"
+#include "app/pin.h"
 #include "graph/types.h"
 #include "persistence/db.h"
 #include "persistence/project_store.h"
 
 namespace zg::ui {
+
+namespace {
+
+// Single source of truth for Tab completion. The dispatcher at the bottom
+// stays an explicit if-chain — at this size a table indirection would buy
+// nothing — but any command added there must be added here too (test_cli
+// pins a few so a drift shows up as a red completion test).
+constexpr const char* kCommands[] = {
+    "/ask", "/clear", "/decay", "/delete", "/edge", "/filter", "/help",
+    "/info", "/neighbors", "/node", "/panic", "/phantom", "/phantoms",
+    "/pin", "/port", "/project", "/projects", "/search", "/select", "/set",
+    "/settings", "/tier",
+};
+
+}  // namespace
+
+std::optional<std::string> cli_history_step(CliState& cli, int dir,
+                                            const std::string& current) {
+    if (cli.history.empty()) return std::nullopt;
+    const int last = static_cast<int>(cli.history.size()) - 1;
+    if (dir < 0) {  // older
+        if (cli.hist_pos == 0) return std::nullopt;  // already at the oldest
+        if (cli.hist_pos < 0) {
+            cli.stash    = current;  // first Up: save the draft
+            cli.hist_pos = last;
+        } else {
+            --cli.hist_pos;
+        }
+        return cli.history[static_cast<std::size_t>(cli.hist_pos)];
+    }
+    // newer
+    if (cli.hist_pos < 0) return std::nullopt;  // already on the fresh line
+    if (cli.hist_pos == last) {
+        cli.hist_pos = -1;
+        return cli.stash;
+    }
+    ++cli.hist_pos;
+    return cli.history[static_cast<std::size_t>(cli.hist_pos)];
+}
+
+void cli_history_push(CliState& cli, const std::string& line) {
+    cli.hist_pos = -1;
+    cli.stash.clear();
+    if (line.find_first_not_of(" \t") == std::string::npos) return;
+    if (!cli.history.empty() && cli.history.back() == line) return;
+    cli.history.push_back(line);
+}
+
+CliCompletion cli_complete(const std::string& input) {
+    CliCompletion out{input, {}};
+    // Only the command word completes: a leading slash and no whitespace
+    // yet (mid-argument Tab is a deliberate no-op, not a file completer).
+    if (input.empty() || input[0] != '/') return out;
+    if (input.find_first_of(" \t") != std::string::npos) return out;
+    for (const char* cmd : kCommands) {
+        if (std::string_view(cmd).substr(0, input.size()) == input) {
+            out.candidates.push_back(cmd);
+        }
+    }
+    if (out.candidates.empty()) return out;
+    if (out.candidates.size() == 1) {
+        out.completed = out.candidates[0] + std::string(" ");
+        return out;
+    }
+    // Ambiguous: extend to the longest common prefix of the candidates.
+    std::string lcp = out.candidates[0];
+    for (const auto& c : out.candidates) {
+        std::size_t i = 0;
+        while (i < lcp.size() && i < c.size() && lcp[i] == c[i]) ++i;
+        lcp.resize(i);
+    }
+    out.completed = lcp;
+    return out;
+}
 
 std::vector<std::string> cli_tokenize(const std::string& line) {
     std::vector<std::string> out;
@@ -51,17 +130,27 @@ void cmd_help(Scrollback& sb) {
     sb.push_back("/edge <a> <b> [kind]                  edge between two nodes");
     sb.push_back("        node refs are an id, an exact title, or a search term");
     sb.push_back("/search <terms...>                    FTS search; jumps to top hit");
+    sb.push_back("/select <ref>                         select + fly to a node");
+    sb.push_back("/neighbors <ref>                      list a node's edges");
+    sb.push_back("/tier <ref> <t>                       set a node's tier");
+    sb.push_back("/delete <ref> [--confirm]             tombstone a node");
     sb.push_back("/projects                             list projects (* = active)");
     sb.push_back("/project <name> [--create]            switch (or create) project");
     sb.push_back("/info                                 active-project stats");
     sb.push_back("/phantom \"label\" [--n N] [--cat c]    inject local phantom(s)");
     sb.push_back("/phantoms [cat]                       list active phantoms");
+    sb.push_back("/pin <phantom-id>                     accept: promote to a node");
+    sb.push_back("/decay <phantom-id|all>               dismiss without pinning");
+    sb.push_back("/ask [ref]                            LLM phantoms about a node");
     sb.push_back("/filter <cat|all>                     show only one phantom category");
     sb.push_back("/settings                             show persisted settings");
     sb.push_back("/set <grid|crt|dim> <on|off>          flip + persist a view flag");
     sb.push_back("/set port <n>  (or /port <n>)         rebind the UDP listener");
+    sb.push_back("/set size <WxH>                       resize + persist the window");
+    sb.push_back("/clear                                clear this scrollback");
     sb.push_back("/panic   overwrite + delete ALL project data, then exit");
     sb.push_back("/help    this list");
+    sb.push_back("up/down recall history; tab completes a command");
 }
 
 // Resolves a node reference to an index into stored_nodes, or -1. Three
@@ -97,6 +186,81 @@ const std::string& node_title(const zg::app::Session& s, long long id) {
     static const std::string untitled = "(untitled)";
     const auto& t = s.stored_nodes[static_cast<std::size_t>(id)].title;
     return t.empty() ? untitled : t;
+}
+
+// Select `idx` and fly the camera to it preserving the current orbit
+// offset — the same move the inspector's live search makes. Selection
+// applies even when the position isn't known yet (no physics snapshot);
+// the camera just stays put in that case.
+void select_and_fly(CliDeps& d, zg::app::Session& s, std::size_t idx) {
+    s.selected_node = static_cast<int>(idx);
+    if (d.camera && idx < s.positions.size()) {
+        const Vector3 offset =
+            Vector3Subtract(d.camera->position, d.camera->target);
+        d.camera->target   = s.positions[idx];
+        d.camera->position = Vector3Add(d.camera->target, offset);
+    }
+}
+
+void cmd_select(const std::vector<std::string>& args,
+                CliDeps& d, Scrollback& sb) {
+    if (!d.session) {
+        sb.push_back("no session");
+        return;
+    }
+    if (args.size() != 2) {
+        sb.push_back("usage: /select <ref>");
+        return;
+    }
+    auto& s = *d.session;
+    const long long id = resolve_node(s, args[1]);
+    if (id < 0) {
+        sb.push_back("no node matching '" + args[1] + "'");
+        return;
+    }
+    select_and_fly(d, s, static_cast<std::size_t>(id));
+    sb.push_back("selected " + std::to_string(id) + " '" + node_title(s, id) +
+                 "'");
+}
+
+void cmd_neighbors(const std::vector<std::string>& args,
+                   CliDeps& d, Scrollback& sb) {
+    if (!d.session) {
+        sb.push_back("no session");
+        return;
+    }
+    if (args.size() != 2) {
+        sb.push_back("usage: /neighbors <ref>");
+        return;
+    }
+    auto& s = *d.session;
+    const long long id = resolve_node(s, args[1]);
+    if (id < 0) {
+        sb.push_back("no node matching '" + args[1] + "'");
+        return;
+    }
+    const auto self = static_cast<std::size_t>(id);
+    std::size_t shown = 0;
+    for (const auto& e : s.edges) {
+        if (e.source != self && e.target != self) continue;
+        const std::size_t other = e.source == self ? e.target : e.source;
+        // Edges to tombstoned counterparts are invisible in the field;
+        // keep the listing consistent with what the operator can see.
+        if (other >= s.stored_nodes.size() || s.stored_nodes[other].deleted) {
+            continue;
+        }
+        std::string line = "  " + std::to_string(other) + "  " +
+                           node_title(s, static_cast<long long>(other));
+        if (!e.kind.empty()) line += " (" + e.kind + ")";
+        if (!e.certainty.empty()) line += " [" + e.certainty + "]";
+        sb.push_back(line);
+        ++shown;
+    }
+    if (shown == 0) {
+        sb.push_back("no edges on " + node_title(s, id));
+    } else {
+        sb.push_back(std::to_string(shown) + " edge" + (shown == 1 ? "" : "s"));
+    }
 }
 
 // Append node + optional edge through the same hot path the toolbar uses:
@@ -205,6 +369,133 @@ void cmd_edge(const std::vector<std::string>& args,
                  (kind.empty() ? "" : " (" + kind + ")"));
 }
 
+void cmd_ask(const std::vector<std::string>& args,
+             CliDeps& d, Scrollback& sb) {
+    if (!d.session || !d.session->db) {
+        sb.push_back("no active project");
+        return;
+    }
+    if (args.size() > 2) {
+        sb.push_back("usage: /ask [ref]   (defaults to the selection)");
+        return;
+    }
+    auto& s = *d.session;
+    long long id = -1;
+    if (args.size() == 2) {
+        id = resolve_node(s, args[1]);
+        if (id < 0) {
+            sb.push_back("no node matching '" + args[1] + "'");
+            return;
+        }
+    } else {
+        if (s.selected_node < 0
+            || static_cast<std::size_t>(s.selected_node) >= s.stored_nodes.size()
+            || s.stored_nodes[static_cast<std::size_t>(s.selected_node)].deleted) {
+            sb.push_back("nothing selected; /ask <ref> or /select one first");
+            return;
+        }
+        id = s.selected_node;
+    }
+    // Same single-flight rule as the inspector button: never double-fire
+    // the subprocess.
+    const auto snap = s.ask.snapshot();
+    if (snap.state == zg::app::LlmAsk::State::Thinking) {
+        sb.push_back("an ask is already in flight" +
+                     (snap.msg.empty() ? "" : ": " + snap.msg));
+        return;
+    }
+    if (!d.ask_start) {
+        sb.push_back("ask unavailable");
+        return;
+    }
+    d.ask_start(id);
+    sb.push_back("asking about node " + std::to_string(id) + " '" +
+                 node_title(s, id) +
+                 "' -- phantoms land via UDP (/phantoms to list)");
+}
+
+void cmd_tier(const std::vector<std::string>& args,
+              CliDeps& d, Scrollback& sb) {
+    if (!d.session || !d.session->db) {
+        sb.push_back("no active project");
+        return;
+    }
+    if (args.size() != 3) {
+        sb.push_back("usage: /tier <ref> <confirmed|suspected|phantom>");
+        return;
+    }
+    auto& s = *d.session;
+    const std::string& tier = args[2];
+    if (tier != "confirmed" && tier != "suspected" && tier != "phantom") {
+        sb.push_back("tier must be confirmed, suspected, or phantom");
+        return;
+    }
+    const long long id = resolve_node(s, args[1]);
+    if (id < 0) {
+        sb.push_back("no node matching '" + args[1] + "'");
+        return;
+    }
+    if (static_cast<std::size_t>(id) == s.self_idx) {
+        sb.push_back("the self node is structural; its tier can't change");
+        return;
+    }
+    s.stored_nodes[static_cast<std::size_t>(id)].tier = tier;
+    s.db->update_node_tier(id, tier);
+    sb.push_back(node_title(s, id) + " -> " + tier);
+}
+
+void cmd_delete(const std::vector<std::string>& args,
+                CliDeps& d, Scrollback& sb) {
+    if (!d.session || !d.session->db) {
+        sb.push_back("no active project");
+        return;
+    }
+    const bool confirm = args.size() == 3 && args[2] == "--confirm";
+    if (args.size() < 2 || (args.size() == 3 && !confirm) || args.size() > 3) {
+        sb.push_back("usage: /delete <ref> [--confirm]");
+        return;
+    }
+    auto& s = *d.session;
+    const long long id = resolve_node(s, args[1]);
+    if (id < 0) {
+        sb.push_back("no node matching '" + args[1] + "'");
+        return;
+    }
+    if (static_cast<std::size_t>(id) == s.self_idx) {
+        sb.push_back("the self node is structural; it can't be deleted");
+        return;
+    }
+    auto& sn = s.stored_nodes[static_cast<std::size_t>(id)];
+    if (!confirm) {
+        // Stateless arm/confirm: the instruction embeds the RESOLVED id,
+        // so the confirming command targets exactly what resolved here
+        // even if a fuzzy ref would resolve differently by then. No armed
+        // state to go stale — T0.7's bug class can't exist.
+        sb.push_back("node " + std::to_string(id) + " '" + node_title(s, id) +
+                     "' -- to delete, type: /delete " + std::to_string(id) +
+                     " --confirm");
+        return;
+    }
+    // Same side-effects as the inspector's delete button: tombstone,
+    // persist, log a node_delete event (phase-2 pin-then-delete metric),
+    // drop the selection if it pointed here. Row stays in the DB so the
+    // phantom_pin -> node_delete events join still finds the pin.
+    sn.deleted = true;
+    s.db->mark_deleted(sn.id);
+    {
+        nlohmann::json p = {
+            {"node_id",     sn.id},
+            {"title_len",   sn.title.size()},
+            {"content_len", sn.content.size()},
+            {"tier",        sn.tier},
+        };
+        s.db->log_event("node_delete", sn.id, p.dump());
+    }
+    if (s.selected_node == static_cast<int>(id)) s.selected_node = -1;
+    sb.push_back("deleted node " + std::to_string(id) + " '" +
+                 node_title(s, id) + "'");
+}
+
 void cmd_phantom(const std::vector<std::string>& args,
                  CliDeps& d, Scrollback& sb) {
     if (!d.phantom_buffer) {
@@ -258,6 +549,84 @@ void cmd_phantom(const std::vector<std::string>& args,
     sb.push_back("injected " + std::to_string(count) + " phantom" +
                  (count == 1 ? "" : "s") +
                  (category.empty() ? "" : " [" + category + "]"));
+}
+
+void cmd_pin(const std::vector<std::string>& args,
+             CliDeps& d, Scrollback& sb) {
+    if (!d.session || !d.session->db) {
+        sb.push_back("no active project");
+        return;
+    }
+    if (!d.phantoms || !d.phantom_buffer) {
+        sb.push_back("phantom snapshot unavailable");
+        return;
+    }
+    char* end = nullptr;
+    const long long id = args.size() == 2
+        ? std::strtoll(args[1].c_str(), &end, 10) : -1;
+    if (args.size() != 2 || !end || *end != '\0' || args[1].empty()) {
+        sb.push_back("usage: /pin <phantom-id>   (/phantoms lists ids)");
+        return;
+    }
+    const zg::telemetry::Phantom* hit = nullptr;
+    for (const auto& ph : *d.phantoms) {
+        if (ph.id == id) { hit = &ph; break; }
+    }
+    if (!hit) {
+        sb.push_back("no active phantom with id " + std::to_string(id) +
+                     " (/phantoms lists them)");
+        return;
+    }
+    // Same path as click-to-pin (app/pin.cpp): identical side-effects and
+    // an identical phantom_pin event, so phase-2 metrics can't tell the
+    // two accept gestures apart except via time_to_pin_s.
+    std::unordered_map<long long, double> no_tracker;
+    const long long new_id = zg::app::pin_phantom(
+        *d.session, *hit, *d.phantom_buffer,
+        d.spawn_tracker ? *d.spawn_tracker : no_tracker);
+    sb.push_back("pinned phantom " + std::to_string(id) + " -> node " +
+                 std::to_string(new_id) + " '" +
+                 node_title(*d.session, new_id) + "'");
+}
+
+void cmd_decay(const std::vector<std::string>& args,
+               CliDeps& d, Scrollback& sb) {
+    if (!d.phantoms || !d.phantom_buffer) {
+        sb.push_back("phantom snapshot unavailable");
+        return;
+    }
+    if (args.size() != 2) {
+        sb.push_back("usage: /decay <phantom-id|all>");
+        return;
+    }
+    // Dismissal is just early removal from the buffer: the next frame's
+    // lifecycle diff sees the phantom gone and logs an ordinary
+    // phantom_decay (lifetime = time-of-dismissal). No new event kind,
+    // and a dismissal counts as a non-pin in the phase-2 metrics, which
+    // is exactly what it is.
+    if (args[1] == "all") {
+        const std::size_t n = d.phantoms->size();
+        d.phantom_buffer->clear();
+        sb.push_back("dismissed " + std::to_string(n) + " phantom" +
+                     (n == 1 ? "" : "s"));
+        return;
+    }
+    char* end = nullptr;
+    const long long id = std::strtoll(args[1].c_str(), &end, 10);
+    if (!end || *end != '\0' || args[1].empty()) {
+        sb.push_back("usage: /decay <phantom-id|all>");
+        return;
+    }
+    bool found = false;
+    for (const auto& ph : *d.phantoms) {
+        if (ph.id == id) { found = true; break; }
+    }
+    if (!found) {
+        sb.push_back("no active phantom with id " + std::to_string(id));
+        return;
+    }
+    d.phantom_buffer->remove(id);
+    sb.push_back("dismissed phantom " + std::to_string(id));
 }
 
 void cmd_phantoms(const std::vector<std::string>& args,
@@ -319,6 +688,42 @@ void cmd_settings(CliDeps& d, Scrollback& sb) {
     sb.push_back(std::string("crt   ") + (st.post_process ? "on" : "off"));
     sb.push_back(std::string("dim   ") + (st.dim_filtered ? "on" : "off"));
     sb.push_back("port  " + std::to_string(st.telemetry_port));
+    sb.push_back("size  " + std::to_string(st.window_w) + "x" +
+                 std::to_string(st.window_h));
+}
+
+void apply_window_size(const std::string& val, CliDeps& d, Scrollback& sb) {
+    if (!d.settings) { sb.push_back("settings unavailable"); return; }
+    // Strict WxH parse: two integers, one 'x', nothing else.
+    const auto xpos = val.find('x');
+    char* end = nullptr;
+    const long w = xpos != std::string::npos && xpos > 0
+        ? std::strtol(val.substr(0, xpos).c_str(), &end, 10) : 0;
+    const bool w_ok = end && *end == '\0';
+    end = nullptr;
+    const long h = xpos != std::string::npos
+        ? std::strtol(val.substr(xpos + 1).c_str(), &end, 10) : 0;
+    const bool h_ok = end && *end == '\0' && xpos + 1 < val.size();
+    if (!w_ok || !h_ok
+        || w < zg::app::kMinWindowW || w > zg::app::kMaxWindowW
+        || h < zg::app::kMinWindowH || h > zg::app::kMaxWindowH) {
+        sb.push_back("size must be WxH, " +
+                     std::to_string(zg::app::kMinWindowW) + "x" +
+                     std::to_string(zg::app::kMinWindowH) + " to " +
+                     std::to_string(zg::app::kMaxWindowW) + "x" +
+                     std::to_string(zg::app::kMaxWindowH));
+        return;
+    }
+    d.settings->window_w = static_cast<int>(w);
+    d.settings->window_h = static_cast<int>(h);
+    if (d.set_window_size) {
+        d.set_window_size(static_cast<int>(w), static_cast<int>(h));
+    }
+    if (d.save_settings && !d.save_settings()) {
+        sb.push_back("warning: settings file not writable");
+    }
+    sb.push_back("window -> " + std::to_string(w) + "x" + std::to_string(h) +
+                 " (saved)");
 }
 
 void apply_port(int port, CliDeps& d, Scrollback& sb) {
@@ -341,7 +746,7 @@ void apply_port(int port, CliDeps& d, Scrollback& sb) {
 void cmd_set(const std::vector<std::string>& args,
              CliDeps& d, Scrollback& sb) {
     if (args.size() != 3) {
-        sb.push_back("usage: /set <grid|crt|dim|port> <value>");
+        sb.push_back("usage: /set <grid|crt|dim|port|size> <value>");
         return;
     }
     const std::string& key = args[1];
@@ -351,13 +756,17 @@ void cmd_set(const std::vector<std::string>& args,
                    d, sb);
         return;
     }
+    if (key == "size") {
+        apply_window_size(val, d, sb);
+        return;
+    }
     if (!d.settings) { sb.push_back("settings unavailable"); return; }
     bool* flag = nullptr;
     if (key == "grid") flag = &d.settings->show_grid;
     else if (key == "crt") flag = &d.settings->post_process;
     else if (key == "dim") flag = &d.settings->dim_filtered;
     if (!flag) {
-        sb.push_back("unknown setting: " + key + " (grid, crt, dim, port)");
+        sb.push_back("unknown setting: " + key + " (grid, crt, dim, port, size)");
         return;
     }
     const int b = parse_bool(val);
@@ -429,16 +838,7 @@ void cmd_search(const std::vector<std::string>& args,
     }
 
     // Select + fly to the top hit, same as the inspector's live search.
-    const auto idx = static_cast<std::size_t>(s.search_hits.front());
-    if (idx < s.positions.size()) {
-        s.selected_node = static_cast<int>(idx);
-        if (d.camera) {
-            const Vector3 offset =
-                Vector3Subtract(d.camera->position, d.camera->target);
-            d.camera->target   = s.positions[idx];
-            d.camera->position = Vector3Add(d.camera->target, offset);
-        }
-    }
+    select_and_fly(d, s, static_cast<std::size_t>(s.search_hits.front()));
 }
 
 void cmd_projects(CliDeps& d, Scrollback& sb) {
@@ -559,14 +959,25 @@ bool run_cli_command(const std::string& line,
         cmd_help(scrollback);
         return false;
     }
+    if (cmd == "/clear") {
+        scrollback.clear();  // echo included — the point is an empty pane
+        return false;
+    }
     if (cmd == "/node") { cmd_node(args, deps, scrollback); return false; }
     if (cmd == "/edge") { cmd_edge(args, deps, scrollback); return false; }
     if (cmd == "/search") { cmd_search(args, deps, scrollback); return false; }
+    if (cmd == "/select") { cmd_select(args, deps, scrollback); return false; }
+    if (cmd == "/neighbors") { cmd_neighbors(args, deps, scrollback); return false; }
+    if (cmd == "/tier") { cmd_tier(args, deps, scrollback); return false; }
+    if (cmd == "/delete") { cmd_delete(args, deps, scrollback); return false; }
     if (cmd == "/projects") { cmd_projects(deps, scrollback); return false; }
     if (cmd == "/project") { cmd_project(args, deps, scrollback); return false; }
     if (cmd == "/info") { cmd_info(deps, scrollback); return false; }
     if (cmd == "/phantom") { cmd_phantom(args, deps, scrollback); return false; }
     if (cmd == "/phantoms") { cmd_phantoms(args, deps, scrollback); return false; }
+    if (cmd == "/pin") { cmd_pin(args, deps, scrollback); return false; }
+    if (cmd == "/decay") { cmd_decay(args, deps, scrollback); return false; }
+    if (cmd == "/ask") { cmd_ask(args, deps, scrollback); return false; }
     if (cmd == "/filter") { cmd_filter(args, deps, scrollback); return false; }
     if (cmd == "/settings") { cmd_settings(deps, scrollback); return false; }
     if (cmd == "/set") { cmd_set(args, deps, scrollback); return false; }
@@ -578,7 +989,11 @@ bool run_cli_command(const std::string& line,
 bool render_cli_tab(CliState& cli, CliDeps& deps) {
     // Scrollback fills the tab except for one prompt line at the bottom.
     const float prompt_h = ImGui::GetFrameHeightWithSpacing();
-    ImGui::BeginChild("cli_scrollback", ImVec2(0, -prompt_h));
+    // Horizontal scrollbar: help/scrollback lines are wider than the panel
+    // at its default width; without it they'd be silently clipped.
+    ImGui::BeginChild("cli_scrollback", ImVec2(0, -prompt_h),
+                      ImGuiChildFlags_None,
+                      ImGuiWindowFlags_HorizontalScrollbar);
     if (cli.scrollback.empty()) {
         ImGui::TextDisabled("zoigraph cli -- /help for commands");
     }
@@ -594,8 +1009,44 @@ bool render_cli_tab(CliState& cli, CliDeps& deps) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     bool fired = false;
+    // History (Up/Down) and completion (Tab) run inside ImGui's InputText
+    // callback because that's the only place the widget lets external code
+    // rewrite the buffer mid-edit. The callback shim translates the event
+    // into the pure helpers above and copies their result back via
+    // DeleteChars/InsertChars (imgui_stdlib keeps cli.input's storage in
+    // sync underneath).
+    const auto callback = [](ImGuiInputTextCallbackData* data) -> int {
+        auto& st = *static_cast<CliState*>(data->UserData);
+        const std::string current(data->Buf,
+                                  static_cast<std::size_t>(data->BufTextLen));
+        std::optional<std::string> replace;
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+            replace = cli_history_step(
+                st, data->EventKey == ImGuiKey_UpArrow ? -1 : +1, current);
+        } else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
+            auto comp = cli_complete(current);
+            if (comp.candidates.size() > 1) {
+                std::string line;
+                for (const auto& c : comp.candidates) {
+                    if (!line.empty()) line += "  ";
+                    line += c;
+                }
+                st.scrollback.push_back(line);
+            }
+            if (comp.completed != current) replace = std::move(comp.completed);
+        }
+        if (replace) {
+            data->DeleteChars(0, data->BufTextLen);
+            data->InsertChars(0, replace->c_str());
+        }
+        return 0;
+    };
     if (ImGui::InputText("##cli_input", &cli.input,
-                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+                         ImGuiInputTextFlags_EnterReturnsTrue
+                             | ImGuiInputTextFlags_CallbackHistory
+                             | ImGuiInputTextFlags_CallbackCompletion,
+                         callback, &cli)) {
+        cli_history_push(cli, cli.input);
         fired = run_cli_command(cli.input, deps, cli.scrollback);
         cli.input.clear();
         // Keep the prompt focused after Enter so the operator can keep

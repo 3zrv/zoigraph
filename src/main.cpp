@@ -74,11 +74,15 @@ using zg::macros::Bones;
 }  // namespace
 
 int main() {
-    constexpr int kWidth  = 1280;
-    constexpr int kHeight = 800;
+    // Operator settings (view flags, telemetry port, window size) persist
+    // across runs in settings.json next to projects/. Loaded before the
+    // window so launch restores the last size, and before the telemetry
+    // thread so the listener binds the persisted port.
+    const std::filesystem::path kSettingsPath = "settings.json";
+    zg::app::Settings settings = zg::app::load_settings(kSettingsPath);
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
-    InitWindow(kWidth, kHeight, "zoigraph");
+    InitWindow(settings.window_w, settings.window_h, "zoigraph");
     SetTargetFPS(144);
     // Raylib defaults to ESC-to-quit; disable so the triple-escape exit
     // gesture gets the keypresses instead.
@@ -112,7 +116,8 @@ int main() {
     // CRT post-process pipeline: render the 3D scene into a texture, then
     // draw it back through the CRT shader. ImGui is layered on top of the
     // composite so the inspector stays crisp.
-    RenderTexture2D scene_rt = LoadRenderTexture(kWidth, kHeight);
+    RenderTexture2D scene_rt = LoadRenderTexture(settings.window_w,
+                                                 settings.window_h);
     Shader crt_shader = LoadShaderFromMemory(nullptr, kCrtFS);
     zg::render::CrtShaderLocs crt_locs;
     crt_locs.resolution = GetShaderLocation(crt_shader, "resolution");
@@ -124,12 +129,6 @@ int main() {
     // in projects/.last so the next launch resumes there.
     const std::filesystem::path kProjectsDir = "projects";
     zg::persistence::migrate_legacy_db("zoigraph.db", kProjectsDir, "default");
-
-    // Operator settings (view flags + telemetry port) persist across runs
-    // in settings.json next to projects/. Loaded before the telemetry
-    // thread so the listener binds the persisted port.
-    const std::filesystem::path kSettingsPath = "settings.json";
-    zg::app::Settings settings = zg::app::load_settings(kSettingsPath);
 
     zg::graph::GraphBuffer            buffer;
     zg::telemetry::PhantomBuffer      phantom_buffer;
@@ -208,6 +207,16 @@ int main() {
     cli_deps.settings       = &settings;
     cli_deps.save_settings  = [&] {
         return zg::app::save_settings(kSettingsPath, settings);
+    };
+    cli_deps.spawn_tracker  = &seen_phantom_spawn;
+    // The IsWindowResized() branch at the top of the frame loop re-creates
+    // the scene render texture next frame, same as a drag-resize.
+    cli_deps.set_window_size = [](int w, int h) { SetWindowSize(w, h); };
+    cli_deps.ask_start      = [&](long long anchor_id) {
+        session.ask.start(
+            zg::persistence::project_path(kProjectsDir,
+                                          session.current_project).string(),
+            anchor_id);
     };
     // Window for the triple-escape exit gesture. 1.5s is forgiving enough to
     // survive OS input latency on a relaxed tap-tap-tap; tightening this much
@@ -347,15 +356,21 @@ int main() {
 
         rlImGuiBegin();
 
-        // Main control panel — fixed-size, position remembered after the
-        // first frame. Width clamps to fit the screen so on narrow displays
-        // the panel never overflows; ImGui's built-in scrollbar handles
-        // vertical overflow inside the tab content.
+        // Main control panel — resizable by dragging the edges/corner;
+        // position and size are remembered after the first frame. The
+        // first-frame default clamps to the screen so the panel never
+        // spawns overflowing a narrow display, and the per-frame max
+        // constraint re-clamps it if the window later shrinks under it
+        // (e.g. /set size).
         const float main_w = std::min(380.0f, static_cast<float>(GetScreenWidth())  - 32.0f);
         const float main_h = std::min(720.0f, static_cast<float>(GetScreenHeight()) - 32.0f);
-        ImGui::SetNextWindowPos (ImVec2(16, 16),       ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(main_w, main_h), ImGuiCond_Always);
-        ImGui::Begin("// ZOIGRAPH //", nullptr, ImGuiWindowFlags_NoResize);
+        ImGui::SetNextWindowPos (ImVec2(16, 16),         ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(main_w, main_h), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(280.0f, 240.0f),
+            ImVec2(static_cast<float>(GetScreenWidth())  - 32.0f,
+                   static_cast<float>(GetScreenHeight()) - 32.0f));
+        ImGui::Begin("// ZOIGRAPH //");
         ImGui::Text("zoigraph :: 0.0.0");
         ImGui::Separator();
 
@@ -431,7 +446,11 @@ int main() {
         physics.reset();
         db.reset();
         // Checkbox/CLI changes both live in `settings`; one write on the
-        // way out keeps the file current without per-frame IO.
+        // way out keeps the file current without per-frame IO. The window
+        // size is captured here so a drag-resize sticks across runs (the
+        // window is still open — CloseWindow comes after).
+        settings.window_w = GetScreenWidth();
+        settings.window_h = GetScreenHeight();
         zg::app::save_settings(kSettingsPath, settings);
     }
 
