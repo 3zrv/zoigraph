@@ -30,11 +30,13 @@ struct Bones {
 // Picks three weakly-connected nodes via zg::graph::pick_weakly_connected_triple,
 // computes a framing position that fits all three, and arms the Bones
 // state machine to smooth-fly the camera there. Opens the scratch panel.
+// `alive` (empty == all alive) keeps tombstoned nodes out of the throw.
 void throw_bones(Bones& b,
                  const std::vector<Vector3>& positions,
                  const std::vector<graph::Edge>& edges,
                  const Camera3D& camera,
-                 std::mt19937& rng);
+                 std::mt19937& rng,
+                 const std::vector<char>& alive = {});
 
 // Advance the smooth fly by `dt` seconds. Snaps to the destination and
 // clears `active` when complete. Panel state is left untouched.

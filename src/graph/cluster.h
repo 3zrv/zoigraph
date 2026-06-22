@@ -20,9 +20,14 @@ namespace zg::graph {
 //
 // Edge direction is ignored. Self-loops are ignored. Edges with endpoint
 // indices >= node_count are silently dropped.
+//
+// `alive` (empty == all alive) excludes tombstoned nodes: edges touching a
+// deleted node are dropped, so a deleted node neither joins a community nor
+// pulls its neighbours into one (it keeps its own singleton label).
 std::vector<std::size_t> label_propagation(
     std::size_t node_count,
     const std::vector<Edge>& edges,
-    int max_iters = 50);
+    int max_iters = 50,
+    const std::vector<char>& alive = {});
 
 }  // namespace zg::graph

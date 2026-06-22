@@ -7,15 +7,21 @@ namespace zg::macros {
 std::vector<std::size_t> pick_rabbit_path(std::size_t start,
                                           const std::vector<graph::Edge>& edges,
                                           std::mt19937& rng,
-                                          std::size_t max_nodes) {
+                                          std::size_t max_nodes,
+                                          const std::vector<char>& alive) {
+    const auto is_alive = [&alive](std::size_t i) {
+        return alive.empty() || (i < alive.size() && alive[i]);
+    };
     std::vector<std::size_t> path = {start};
     std::size_t current = start;
     for (int hop = 0; hop < kRabbitHopCount; ++hop) {
         std::vector<std::size_t> neighbors;
         for (const auto& e : edges) {
-            if (e.source == current && e.target < max_nodes && e.target != current) {
+            if (e.source == current && e.target < max_nodes && e.target != current
+                && is_alive(e.target)) {
                 neighbors.push_back(e.target);
-            } else if (e.target == current && e.source < max_nodes && e.source != current) {
+            } else if (e.target == current && e.source < max_nodes && e.source != current
+                       && is_alive(e.source)) {
                 neighbors.push_back(e.source);
             }
         }

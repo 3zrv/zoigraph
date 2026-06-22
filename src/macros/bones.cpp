@@ -12,8 +12,9 @@ void throw_bones(Bones& b,
                  const std::vector<Vector3>& positions,
                  const std::vector<graph::Edge>& edges,
                  const Camera3D& camera,
-                 std::mt19937& rng) {
-    b.chosen = graph::pick_weakly_connected_triple(positions.size(), edges, rng);
+                 std::mt19937& rng,
+                 const std::vector<char>& alive) {
+    b.chosen = graph::pick_weakly_connected_triple(positions.size(), edges, rng, alive);
     if (b.chosen.size() != 3) {
         b.active = false;
         b.panel_open = false;

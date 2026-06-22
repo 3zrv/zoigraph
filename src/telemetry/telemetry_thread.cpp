@@ -50,6 +50,7 @@
 #include <string>
 #include <string_view>
 
+#include "app/clock.h"
 #include "telemetry/phantom_parse.h"
 
 namespace zg::telemetry {
@@ -132,7 +133,7 @@ void TelemetryThread::run() {
 
         auto phantom = parse_phantom(std::string_view(buf.data(), static_cast<std::size_t>(n)));
         if (!phantom) continue;
-        phantom->spawn_time = GetTime();
+        phantom->spawn_time = zg::app::mono_now();
         buffer_.add(*phantom);
     }
 

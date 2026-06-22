@@ -28,7 +28,21 @@ void render_project_tab(zg::app::Session& s,
 
     ImGui::Text("active: %s", current_project.c_str());
     {
-        const auto names = zg::persistence::list_projects(projects_dir);
+        // Cache the directory scan instead of statting projects/ every frame.
+        // This function runs only while the Project tab is active, so a gap in
+        // ImGui's frame counter means the tab just (re)gained focus -- refresh
+        // then (catches DBs added outside the app), on first render, and after
+        // a local create/delete sets cache_dirty.
+        static std::vector<std::string> names;
+        static int  last_frame  = -1000;
+        static bool cache_dirty = true;
+        const int frame = ImGui::GetFrameCount();
+        if (cache_dirty || frame > last_frame + 1) {
+            names       = zg::persistence::list_projects(projects_dir);
+            cache_dirty = false;
+        }
+        last_frame = frame;
+
         int active_idx = -1;
         std::vector<const char*> ptrs;
         ptrs.reserve(names.size());
@@ -65,6 +79,7 @@ void render_project_tab(zg::app::Session& s,
                 new_name.clear();
                 create_msg.clear();
                 open_project(to_open);
+                cache_dirty = true;  // new project must appear in the list
             }
         }
         if (!create_msg.empty()) {
@@ -97,6 +112,7 @@ void render_project_tab(zg::app::Session& s,
                 if (!fallback.empty()) {
                     open_project(fallback);
                     zg::persistence::delete_project(projects_dir, victim);
+                    cache_dirty = true;  // deleted project must leave the list
                 }
                 delete_armed_project.clear();
             }
@@ -153,8 +169,12 @@ void render_project_tab(zg::app::Session& s,
     // by the cluster halo around each node in the 3D view.
     ImGui::TextDisabled("clustering");
     if (ImGui::Button("auto-cluster")) {
+        std::vector<char> alive(stored_nodes.size());
+        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+            alive[i] = !stored_nodes[i].deleted;
+        }
         cluster_ids = zg::graph::label_propagation(
-            stored_nodes.size(), edges, /*max_iters=*/100);
+            stored_nodes.size(), edges, /*max_iters=*/100, alive);
     }
     ImGui::SameLine();
     if (ImGui::Button("clear clusters")) {

@@ -708,3 +708,61 @@ TEST_CASE("integrator: every-coefficient-zero params yields zero motion") {
     CHECK(positions[0].x == doctest::Approx(1.0f));
     CHECK(positions[1].z == doctest::Approx(-6.0f));
 }
+
+TEST_CASE("integrate: a disabled node is frozen with zero velocity") {
+    for (bool bh : {false, true}) {
+        std::vector<Vector3> pos = {{-2, 0, 0}, {2, 0, 0}, {0, 3, 0}};
+        std::vector<Vector3> vel(3, Vector3{0, 0, 0});
+        SimParams p{};
+        p.use_barnes_hut = bh;
+        const std::vector<char> disabled = {0, 1, 0};  // node 1 disabled
+        const Vector3 before = pos[1];
+        integrate_step(pos, vel, {}, p, {}, disabled);
+
+        CHECK(pos[1].x == before.x);   // frozen exactly
+        CHECK(pos[1].y == before.y);
+        CHECK(pos[1].z == before.z);
+        CHECK(vel[1].x == 0.0f);
+        CHECK(vel[1].y == 0.0f);
+        CHECK(vel[1].z == 0.0f);
+        // a live node still moved — forces are otherwise active.
+        CHECK((pos[0].x != -2.0f || pos[0].y != 0.0f || pos[0].z != 0.0f));
+    }
+}
+
+TEST_CASE("integrate: a disabled node exerts no repulsion on its neighbours") {
+    auto run = [](bool disable_b, bool bh) {
+        std::vector<Vector3> pos = {{-2.0f, 0, 0}, {-1.8f, 0, 0}};  // A, B close
+        std::vector<Vector3> vel(2, Vector3{0, 0, 0});
+        SimParams p{};
+        p.use_barnes_hut = bh;
+        const std::vector<char> dis =
+            disable_b ? std::vector<char>{0, 1} : std::vector<char>{};
+        integrate_step(pos, vel, {}, p, {}, dis);
+        return pos[0].x;  // where node A landed
+    };
+    // Live B shoves A further -x via the strong close-range repulsion; disabled
+    // B leaves A feeling only the centering pull toward 0 (+x). So the live-B
+    // run ends with A more negative than the disabled-B run — on both paths.
+    CHECK(run(false, false) < run(true, false));  // naive O(N^2)
+    CHECK(run(false, true)  < run(true, true));   // barnes-hut
+}
+
+TEST_CASE("integrate: an edge to a disabled node does not pull") {
+    SimParams p{};                // only the spring acts
+    p.repulsion_k         = 0.0f;
+    p.center_k            = 0.0f;
+    p.phantom_repulsion_k = 0.0f;
+    const std::vector<Edge> spring = {{0, 1}};  // stretched (rest 4, length 10)
+
+    std::vector<Vector3> live = {{0, 0, 0}, {10, 0, 0}};
+    std::vector<Vector3> vlive(2, Vector3{0, 0, 0});
+    integrate_step(live, vlive, spring, p, {}, {});
+    CHECK(live[0].x > 0.0f);  // A pulled toward B
+
+    std::vector<Vector3> dead = {{0, 0, 0}, {10, 0, 0}};
+    std::vector<Vector3> vdead(2, Vector3{0, 0, 0});
+    integrate_step(dead, vdead, spring, p, {}, {0, 1});  // B disabled
+    CHECK(dead[0].x == doctest::Approx(0.0f));  // edge skipped → no pull
+    CHECK(dead[0].y == doctest::Approx(0.0f));
+}

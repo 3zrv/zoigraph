@@ -18,6 +18,14 @@ add_executable(test_settings test_settings.cpp)
 target_link_libraries(test_settings PRIVATE zg_app doctest::doctest)
 add_test(NAME settings COMMAND test_settings)
 
+add_executable(test_session test_session.cpp)
+target_link_libraries(test_session PRIVATE zg_app doctest::doctest)
+add_test(NAME session COMMAND test_session)
+
+add_executable(test_paths test_paths.cpp)
+target_link_libraries(test_paths PRIVATE zg_app doctest::doctest)
+add_test(NAME paths COMMAND test_paths)
+
 add_executable(test_cli test_cli.cpp)
 target_link_libraries(test_cli PRIVATE zg_ui doctest::doctest)
 add_test(NAME cli COMMAND test_cli)
@@ -62,6 +70,10 @@ add_test(NAME barnes_hut COMMAND test_barnes_hut)
 add_executable(test_picks test_picks.cpp)
 target_link_libraries(test_picks PRIVATE zg_graph doctest::doctest)
 add_test(NAME picks COMMAND test_picks)
+
+add_executable(test_rabbit test_rabbit.cpp)
+target_link_libraries(test_rabbit PRIVATE zg_macros doctest::doctest)
+add_test(NAME rabbit COMMAND test_rabbit)
 
 add_executable(test_wikilinks test_wikilinks.cpp)
 target_link_libraries(test_wikilinks PRIVATE zg_graph doctest::doctest)

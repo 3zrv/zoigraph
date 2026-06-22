@@ -111,6 +111,20 @@ TEST_CASE("random_fill: edges reference only ids in the new range") {
     }
 }
 
+TEST_CASE("random_fill: no duplicate undirected edge pairs") {
+    // 50 nodes have 1225 possible pairs, so 100 requested edges are all
+    // distinct; (a,b) must never repeat and (a,b)+(b,a) must not both appear.
+    const auto g = make_random_fill(50, 100, /*start_id=*/0, 100.0);
+    CHECK(g.edges.size() == 100);
+    std::set<std::pair<std::size_t, std::size_t>> seen;
+    for (const auto& e : g.edges) {
+        const auto key = (e.source < e.target)
+            ? std::make_pair(e.source, e.target)
+            : std::make_pair(e.target, e.source);
+        CHECK(seen.insert(key).second);  // first time we've seen this pair
+    }
+}
+
 TEST_CASE("random_fill: every node carries the supplied timestamp") {
     const auto g = make_random_fill(20, 0, 0, /*now=*/1234.5);
     REQUIRE(g.nodes.size() == 20);

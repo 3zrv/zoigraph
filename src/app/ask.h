@@ -64,6 +64,11 @@ public:
     // the UI button when state == Thinking). Returns immediately.
     void start(std::string db_path, long long anchor_id);
 
+    // Point the worker at the emitter script (resolved by main against the exe
+    // dir / CWD so a relocated dist tarball still finds it). Set once at
+    // startup, before any ask. Defaults to CWD-relative "scripts/llm_phantom.py".
+    void set_script_path(std::string path);
+
     // Cheap, frame-safe read. Returns a copy so the caller can branch on
     // state without holding the lock.
     Snapshot snapshot() const;
@@ -75,6 +80,7 @@ private:
     State               state_ = State::Idle;
     std::string         msg_;
     std::thread         worker_;
+    std::string         script_path_ = "scripts/llm_phantom.py";
 };
 
 }  // namespace zg::app

@@ -26,7 +26,11 @@ struct PromotionResult {
 // the bound for connection-id range filtering -- any target id < 0,
 // >= positions_size, or == new_id is silently dropped (skipped, not
 // erroring) so the model can't materialise edges to nodes that don't
-// exist or to itself.
+// exist or to itself. Repeated targets are deduped (the model emitting
+// `connections:[5,5]` yields one edge to 5, not a doubled spring).
+//
+// `alive` (empty == all alive) drops connections to tombstoned nodes, so a
+// promoted phantom can't materialise an edge into a soft-deleted node.
 //
 // Promotion contract (the trust gradient on the wire):
 //   - node.tier      = "phantom"      (lowest tier; operator promotes manually)
@@ -37,6 +41,7 @@ struct PromotionResult {
 PromotionResult promote_phantom(const zg::telemetry::Phantom& ph,
                                 long long new_id,
                                 double now_ts,
-                                std::size_t positions_size);
+                                std::size_t positions_size,
+                                const std::vector<char>& alive = {});
 
 }  // namespace zg::app

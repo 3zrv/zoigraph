@@ -26,10 +26,15 @@ struct RabbitHole {
 // Walk `kRabbitHopCount` random connected edges starting at `start`. Pure
 // function — no globals. May terminate early if a node has no neighbors,
 // in which case the macro just animates a shorter trip.
+//
+// `alive` (empty == all alive) excludes tombstoned nodes: a deleted node is
+// never hopped to, so the path never routes through one (the caller passes an
+// alive `start`).
 std::vector<std::size_t> pick_rabbit_path(std::size_t start,
                                           const std::vector<graph::Edge>& edges,
                                           std::mt19937& rng,
-                                          std::size_t max_nodes);
+                                          std::size_t max_nodes,
+                                          const std::vector<char>& alive = {});
 
 // Advance an active RabbitHole by `dt` seconds. Smoothly interpolates the
 // camera target along the current segment with smoothstep easing; on path

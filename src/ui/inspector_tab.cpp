@@ -311,6 +311,7 @@ void render_inspector_tab(zg::app::Session& s,
             if (ImGui::SmallButton("yes, delete")) {
                 sn.deleted = true;
                 db->mark_deleted(sn.id);
+                if (s.physics) s.physics->set_node_disabled(static_cast<std::size_t>(sn.id));
                 {
                     nlohmann::json p = {
                         {"node_id", sn.id},

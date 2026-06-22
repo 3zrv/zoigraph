@@ -162,9 +162,14 @@ Vector3 force_from_cell(const std::vector<OctreeNode>& tree, int node_idx,
 void apply_barnes_hut_repulsion(const std::vector<Vector3>& positions,
                                 std::vector<Vector3>& forces_out,
                                 float repulsion_k,
-                                float theta) {
+                                float theta,
+                                const std::vector<char>& disabled) {
     const std::size_t n = positions.size();
     if (n < 2) return;
+
+    const auto off = [&disabled](std::size_t i) {
+        return i < disabled.size() && disabled[i];
+    };
 
     // Bounding cube around every particle (a touch larger so points on the
     // boundary land cleanly inside).
@@ -192,11 +197,13 @@ void apply_barnes_hut_repulsion(const std::vector<Vector3>& positions,
     tree.push_back(root);
 
     for (std::size_t i = 0; i < n; ++i) {
+        if (off(i)) continue;  // disabled: no mass in the tree
         insert(tree, 0, static_cast<int>(i), positions, 0);
     }
     compute_com(tree, 0, positions);
 
     for (std::size_t i = 0; i < n; ++i) {
+        if (off(i)) continue;  // disabled: receives no force
         const Vector3 f = force_from_cell(tree, 0, positions[i],
                                           static_cast<int>(i),
                                           repulsion_k, theta);

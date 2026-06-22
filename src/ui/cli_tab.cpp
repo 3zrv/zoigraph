@@ -146,6 +146,7 @@ void cmd_help(Scrollback& sb) {
     sb.push_back("/settings                             show persisted settings");
     sb.push_back("/set <grid|crt|dim> <on|off>          flip + persist a view flag");
     sb.push_back("/set port <n>  (or /port <n>)         rebind the UDP listener");
+    sb.push_back("/set qport <n>                        rebind the query channel");
     sb.push_back("/set size <WxH>                       resize + persist the window");
     sb.push_back("/clear                                clear this scrollback");
     sb.push_back("/panic   overwrite + delete ALL project data, then exit");
@@ -482,6 +483,7 @@ void cmd_delete(const std::vector<std::string>& args,
     // phantom_pin -> node_delete events join still finds the pin.
     sn.deleted = true;
     s.db->mark_deleted(sn.id);
+    if (s.physics) s.physics->set_node_disabled(static_cast<std::size_t>(sn.id));
     {
         nlohmann::json p = {
             {"node_id",     sn.id},
@@ -528,7 +530,7 @@ void cmd_phantom(const std::vector<std::string>& args,
     // UDP senders pick their own (usually small) ids; CLI phantoms start
     // at 2e6 so the three sources can't collide.
     static long long cli_phantom_id = 2000000;
-    const double now = GetTime();
+    const double now = zg::app::mono_now();  // same base as TTL expiry / pin timing
     for (long long i = 0; i < count; ++i) {
         zg::telemetry::Phantom p{};
         p.id         = cli_phantom_id++;
@@ -688,6 +690,7 @@ void cmd_settings(CliDeps& d, Scrollback& sb) {
     sb.push_back(std::string("crt   ") + (st.post_process ? "on" : "off"));
     sb.push_back(std::string("dim   ") + (st.dim_filtered ? "on" : "off"));
     sb.push_back("port  " + std::to_string(st.telemetry_port));
+    sb.push_back("qport " + std::to_string(st.query_port));
     sb.push_back("size  " + std::to_string(st.window_w) + "x" +
                  std::to_string(st.window_h));
 }
@@ -743,10 +746,27 @@ void apply_port(int port, CliDeps& d, Scrollback& sb) {
                  " (bind is async; /info shows status)");
 }
 
+void apply_query_port(int port, CliDeps& d, Scrollback& sb) {
+    if (port < 1 || port > 65535) {
+        sb.push_back("qport must be 1-65535");
+        return;
+    }
+    if (!d.settings) { sb.push_back("settings unavailable"); return; }
+    if (d.set_query_port) {
+        d.set_query_port(port);  // tears down + rebinds the query socket
+    }
+    d.settings->query_port = port;
+    if (d.save_settings && !d.save_settings()) {
+        sb.push_back("warning: settings file not writable");
+    }
+    sb.push_back("query channel moving to 127.0.0.1:" + std::to_string(port) +
+                 " (bind is async; /info shows status)");
+}
+
 void cmd_set(const std::vector<std::string>& args,
              CliDeps& d, Scrollback& sb) {
     if (args.size() != 3) {
-        sb.push_back("usage: /set <grid|crt|dim|port|size> <value>");
+        sb.push_back("usage: /set <grid|crt|dim|port|qport|size> <value>");
         return;
     }
     const std::string& key = args[1];
@@ -754,6 +774,11 @@ void cmd_set(const std::vector<std::string>& args,
     if (key == "port") {
         apply_port(static_cast<int>(std::strtol(val.c_str(), nullptr, 10)),
                    d, sb);
+        return;
+    }
+    if (key == "qport") {
+        apply_query_port(static_cast<int>(std::strtol(val.c_str(), nullptr, 10)),
+                         d, sb);
         return;
     }
     if (key == "size") {
@@ -766,7 +791,8 @@ void cmd_set(const std::vector<std::string>& args,
     else if (key == "crt") flag = &d.settings->post_process;
     else if (key == "dim") flag = &d.settings->dim_filtered;
     if (!flag) {
-        sb.push_back("unknown setting: " + key + " (grid, crt, dim, port, size)");
+        sb.push_back("unknown setting: " + key +
+                     " (grid, crt, dim, port, qport, size)");
         return;
     }
     const int b = parse_bool(val);
@@ -921,6 +947,14 @@ void cmd_info(CliDeps& d, Scrollback& sb) {
             status = d.port_listening() ? " (listening)" : " (NOT bound)";
         }
         sb.push_back("udp       127.0.0.1:" + std::to_string(d.get_port()) +
+                     status);
+    }
+    if (d.get_query_port) {
+        std::string status;
+        if (d.query_port_listening) {
+            status = d.query_port_listening() ? " (listening)" : " (NOT bound)";
+        }
+        sb.push_back("query     127.0.0.1:" + std::to_string(d.get_query_port()) +
                      status);
     }
 }

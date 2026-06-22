@@ -646,6 +646,7 @@ struct SettingsFixture {
     CliDeps           deps;
     int               saves     = 0;
     int               port_seen = -1;
+    int               query_port_seen = -1;
     int               size_w    = -1;
     int               size_h    = -1;
 
@@ -655,6 +656,9 @@ struct SettingsFixture {
         deps.get_port      = [this] { return settings.telemetry_port; };
         deps.set_port      = [this](int p) { port_seen = p; return true; };
         deps.port_listening = [] { return true; };
+        deps.get_query_port = [this] { return settings.query_port; };
+        deps.set_query_port = [this](int p) { query_port_seen = p; return true; };
+        deps.query_port_listening = [] { return true; };
         deps.set_window_size = [this](int w, int h) { size_w = w; size_h = h; };
     }
 };
@@ -669,6 +673,26 @@ TEST_CASE("cli: /settings lists every persisted value") {
     CHECK(any_line_contains(sb, "crt   on"));
     CHECK(any_line_contains(sb, "dim   on"));
     CHECK(any_line_contains(sb, "port  7777"));
+    CHECK(any_line_contains(sb, "qport 7778"));
+}
+
+TEST_CASE("cli: /set qport rebinds the query channel and persists") {
+    SettingsFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/set qport 9000", f.deps, sb);
+    CHECK(f.query_port_seen == 9000);
+    CHECK(f.settings.query_port == 9000);
+    CHECK(f.saves == 1);
+}
+
+TEST_CASE("cli: /set qport rejects out-of-range and leaves the port untouched") {
+    SettingsFixture f;
+    std::vector<std::string> sb;
+    run_cli_command("/set qport 99999", f.deps, sb);
+    run_cli_command("/set qport 0", f.deps, sb);
+    CHECK(f.query_port_seen == -1);
+    CHECK(f.settings.query_port == 7778);
+    CHECK(f.saves == 0);
 }
 
 TEST_CASE("cli: /set flips a flag and saves") {

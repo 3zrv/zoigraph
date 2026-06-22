@@ -10,6 +10,19 @@
 
 namespace zg::app {
 
+long long Session::next_node_id() const {
+    return static_cast<long long>(stored_nodes.size());
+}
+
+long long Session::append_node(zg::persistence::StoredNode n) {
+    const long long id = next_node_id();
+    n.id = id;
+    stored_nodes.push_back(std::move(n));
+    if (physics) physics->enqueue_node(stored_nodes.back().position);
+    if (db)      db->insert_node(stored_nodes.back());
+    return id;
+}
+
 void open_project(Session& s,
                   const std::string& name,
                   const std::filesystem::path& projects_dir,

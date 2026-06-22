@@ -178,3 +178,20 @@ TEST_CASE("hooke: rest_length of zero gives pure attraction along the axis") {
     CHECK(near_eq(f.y, 4.0f));
     CHECK(near_eq(f.z, 0.0f));
 }
+
+TEST_CASE("mean_speed_squared: empty set is zero") {
+    CHECK(zg::physics::mean_speed_squared({}) == 0.0f);
+}
+
+TEST_CASE("mean_speed_squared: averages the squared speeds") {
+    // speeds^2: (3,4,0)->25, (0,0,0)->0, (0,0,5)->25, (1,0,0)->1. mean = 51/4.
+    std::vector<Vector3> v = {{3, 4, 0}, {0, 0, 0}, {0, 0, 5}, {1, 0, 0}};
+    CHECK(zg::physics::mean_speed_squared(v) == doctest::Approx(51.0f / 4.0f));
+}
+
+TEST_CASE("mean_speed_squared: a few fast stragglers wash out across many at rest") {
+    // 999 nodes at rest + 1 moving fast => mean stays tiny, unlike a max.
+    std::vector<Vector3> v(999, Vector3{0, 0, 0});
+    v.push_back({10, 0, 0});  // speed^2 = 100
+    CHECK(zg::physics::mean_speed_squared(v) == doctest::Approx(100.0f / 1000.0f));
+}

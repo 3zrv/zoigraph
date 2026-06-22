@@ -159,6 +159,7 @@ add_library(zg_app STATIC
     src/app/ask.cpp
     src/app/promote.cpp
     src/app/phantom_lifecycle.cpp
+    src/app/paths.cpp
     src/app/query_responder.cpp
     src/app/query_token.cpp
     src/app/settings.cpp
@@ -286,6 +287,16 @@ if(NOT WIN32)
     target_link_libraries(zoigraph PRIVATE pthread)
 endif()
 
+
+# ---- benchmark (dev perf probe, built on demand: --target bench_scale) -----
+add_executable(bench_scale EXCLUDE_FROM_ALL tools/bench_scale.cpp)
+target_include_directories(bench_scale PRIVATE src)
+# zg_physics_thread defines integrate_step (+ pulls zg_physics/barnes_hut,
+# zg_graph/ppr, raylib); zg_persistence pulls db + seed + sqlite3.
+target_link_libraries(bench_scale PRIVATE zg_physics_thread zg_persistence)
+if(NOT WIN32)
+    target_link_libraries(bench_scale PRIVATE pthread)
+endif()
 
 # ---- tests -----------------------------------------------------------------
 enable_testing()

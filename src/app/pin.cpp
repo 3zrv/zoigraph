@@ -16,16 +16,21 @@ long long pin_phantom(Session& s,
                       const zg::telemetry::Phantom& ph,
                       zg::telemetry::PhantomBuffer& phantom_buffer,
                       std::unordered_map<long long, double>& seen_phantom_spawn) {
-    const long long new_id      = static_cast<long long>(s.stored_nodes.size());
+    const long long new_id      = s.next_node_id();
     const double    promoted_ts = unix_now();
 
     // promote_phantom is the pure-logic version of click-to-pin (covered
     // by test_promote). Edge dropping rules and the trust-gradient
     // defaults (node tier + edge certainty = "phantom") live there; this
     // site just consumes the result.
-    auto promo = promote_phantom(ph, new_id, promoted_ts, s.positions.size());
-    s.stored_nodes.push_back(std::move(promo.node));
-    s.db->insert_node(s.stored_nodes.back());
+    std::vector<char> alive(s.stored_nodes.size());
+    for (std::size_t i = 0; i < s.stored_nodes.size(); ++i) {
+        alive[i] = !s.stored_nodes[i].deleted;
+    }
+    auto promo = promote_phantom(ph, new_id, promoted_ts, s.positions.size(), alive);
+    // append_node mints id == new_id, enqueues the node into physics (its
+    // position is ph.position) and inserts it; we add the materialised edges.
+    s.append_node(std::move(promo.node));
     for (const auto& e : promo.edges) {
         s.edges.push_back(e);
         if (s.physics) s.physics->enqueue_edge(e);
@@ -33,7 +38,6 @@ long long pin_phantom(Session& s,
     }
 
     phantom_buffer.remove(ph.id);
-    if (s.physics) s.physics->enqueue_node(ph.position);
     s.selected_node = static_cast<int>(new_id);
 
     // Log the pin and remove this id from the spawn tracker so main's
@@ -43,7 +47,7 @@ long long pin_phantom(Session& s,
     // behavioural signal for the trust-gradient test.
     const auto spawn_it = seen_phantom_spawn.find(ph.id);
     const double time_to_pin = (spawn_it != seen_phantom_spawn.end())
-        ? (GetTime() - spawn_it->second) : 0.0;
+        ? (zg::app::mono_now() - spawn_it->second) : 0.0;
     if (spawn_it != seen_phantom_spawn.end()) {
         seen_phantom_spawn.erase(spawn_it);
     }

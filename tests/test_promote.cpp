@@ -136,3 +136,28 @@ TEST_CASE("promote_phantom: new_id=0 (empty graph case) still drops self-edge") 
     CHECK(out.edges[0].target == 1u);
     CHECK(out.edges[1].target == 2u);
 }
+
+TEST_CASE("promote_phantom: connections to a tombstoned target are dropped") {
+    const auto ph = make_phantom();  // connections to 1, 2, 5
+    const std::vector<char> alive = {1, 1, 0, 1, 1, 1};  // node 2 dead
+    const auto out = promote_phantom(ph, /*new_id=*/10, 0.0, /*positions_size=*/20, alive);
+    REQUIRE(out.edges.size() == 2);            // edge to 2 dropped
+    CHECK(out.edges[0].target == 1u);
+    CHECK(out.edges[1].target == 5u);
+}
+
+TEST_CASE("promote_phantom: an empty alive mask keeps every in-range target") {
+    const auto ph = make_phantom();  // 1, 2, 5
+    const auto out = promote_phantom(ph, 10, 0.0, 20, {});  // explicit empty mask
+    CHECK(out.edges.size() == 3);
+}
+
+TEST_CASE("promote_phantom: repeated targets collapse to a single edge") {
+    auto ph = make_phantom();
+    ph.connections = {{5, "knows"}, {5, "owns"}, {7, ""}, {5, ""}};
+    const auto out = promote_phantom(ph, /*new_id=*/10, 0.0, 20);
+    REQUIRE(out.edges.size() == 2);            // one edge to 5, one to 7
+    CHECK(out.edges[0].target == 5u);
+    CHECK(out.edges[0].kind   == "knows");     // first occurrence wins
+    CHECK(out.edges[1].target == 7u);
+}

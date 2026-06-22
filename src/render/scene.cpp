@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "app/clock.h"
 #include "render/draw.h"
 #include "render/sizes.h"
 
@@ -97,6 +98,17 @@ void draw_scene_3d(const zg::app::Session& s,
         DrawLine3D(positions[e.source], positions[e.target], line_color);
     }
 
+    // Per-node halos (tier / tag / cluster / tag-filter / diff) are
+    // immediate-mode wire-spheres — one DrawSphereWires per node per active
+    // halo. After auto-cluster every node gets a cluster halo, so this is N
+    // draw calls and the perf cliff past instancing. Above kHaloCap nodes,
+    // skip them: individual rings are visually indistinguishable in a field
+    // that dense anyway. The self halo (a single node, navigationally useful)
+    // always draws; so do the bounded selection/bones halos below the loop.
+    // (Batching/instancing the halos would keep them at scale — deferred.)
+    constexpr std::size_t kHaloCap = 4000;
+    const bool draw_halos = positions.size() <= kHaloCap;
+
     // Tier indicators: every non-confirmed node gets a small wireframe
     // halo whose color reflects its tier. Confirmed nodes stay bare
     // (the bulk of the field) so the few tiered ones pop visually.
@@ -106,11 +118,13 @@ void draw_scene_3d(const zg::app::Session& s,
         const auto& tier = stored_nodes[i].tier;
         if (tier == "self") {
             DrawSphereWires(positions[i], kNodeRadius * 2.0f, 12, 12, GREEN);
-        } else if (tier == "suspected") {
+        } else if (draw_halos && tier == "suspected") {
             DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, ORANGE);
-        } else if (tier == "phantom") {
+        } else if (draw_halos && tier == "phantom") {
             DrawSphereWires(positions[i], kNodeRadius * 1.4f, 8, 8, VIOLET);
         }
+
+        if (!draw_halos) continue;  // skip the remaining per-node halos at scale
 
         // Tag halo: nodes with at least one tag get an additional ring
         // colored by a hash of the first tag's name. Layered with the
@@ -189,7 +203,12 @@ void draw_scene_3d(const zg::app::Session& s,
     // animated jagged lines to each referenced Static Node.
     if (!phantoms.empty()) {
         rlSetBlendMode(RL_BLEND_ADDITIVE);
-        const double now = GetTime();
+        // Phantom spawn_time is stamped with mono_now() (steady_clock) on the
+        // telemetry/toolbar/CLI side, so the fade age MUST be measured against
+        // the same clock — not raylib's GetTime() (a different epoch), which
+        // would peg the glow at full alpha for the whole TTL. mono_now() also
+        // works fine as the jagged-line animation phase.
+        const double now = zg::app::mono_now();
         for (const auto& ph : phantoms) {
             const float age  = static_cast<float>(now - ph.spawn_time);
             const float life = std::clamp(1.0f - age / phantom_ttl, 0.0f, 1.0f);

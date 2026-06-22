@@ -1,7 +1,9 @@
 #include "persistence/seed.h"
 
 #include <random>
+#include <set>
 #include <string>
+#include <utility>
 
 namespace zg::persistence {
 
@@ -121,10 +123,20 @@ InitialGraph make_random_fill(int          node_count,
             static_cast<std::size_t>(start_id),
             static_cast<std::size_t>(start_id + node_count - 1));
         out.edges.reserve(edge_count);
-        for (int i = 0; i < edge_count; ++i) {
+        // Dedup undirected pairs so the same spring isn't laid down twice
+        // (and (a,b) + (b,a) don't both appear). Bounded rejection loop: a
+        // request for more edges than the graph has distinct pairs simply
+        // yields fewer, rather than spinning forever.
+        std::set<std::pair<std::size_t, std::size_t>> seen;
+        const int max_attempts = edge_count * 20 + 100;
+        for (int attempt = 0;
+             static_cast<int>(out.edges.size()) < edge_count && attempt < max_attempts;
+             ++attempt) {
             std::size_t a = idx(rng);
             std::size_t b = idx(rng);
-            while (b == a) b = idx(rng);
+            if (a == b) continue;
+            const auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+            if (!seen.insert(key).second) continue;  // duplicate undirected pair
             out.edges.push_back({a, b});
         }
     }

@@ -148,3 +148,44 @@ TEST_CASE("picks: result indices are always within [0, node_count)") {
         }
     }
 }
+
+TEST_CASE("picks: a tombstoned node is never one of the three") {
+    // node 2 is deleted; with no edges every alive triple is valid, so the
+    // picker has free rein — it must still never return node 2.
+    const std::vector<char> alive = {1, 1, 0, 1, 1, 1};  // node 2 dead
+    std::mt19937 rng(7);
+    for (int trial = 0; trial < 300; ++trial) {
+        const auto pick = pick_weakly_connected_triple(6, {}, rng, alive);
+        REQUIRE(pick.size() == 3);
+        CHECK(all_distinct(pick));
+        for (auto i : pick) CHECK(i != 2u);
+    }
+}
+
+TEST_CASE("picks: dense graph fallback also skips tombstoned nodes") {
+    // Fully-connected 5-node graph forces the fallback path; node 0 dead.
+    std::vector<Edge> edges;
+    for (std::size_t i = 0; i < 5; ++i)
+        for (std::size_t j = i + 1; j < 5; ++j) edges.push_back({i, j});
+    const std::vector<char> alive = {0, 1, 1, 1, 1};  // node 0 dead
+    std::mt19937 rng(3);
+    for (int trial = 0; trial < 100; ++trial) {
+        const auto pick = pick_weakly_connected_triple(5, edges, rng, alive);
+        REQUIRE(pick.size() == 3);
+        for (auto i : pick) CHECK(i != 0u);
+    }
+}
+
+TEST_CASE("picks: fewer than 3 alive nodes returns empty") {
+    const std::vector<char> alive = {1, 1, 0, 0, 0};  // only 2 alive
+    std::mt19937 rng(1);
+    CHECK(pick_weakly_connected_triple(5, {}, rng, alive).empty());
+}
+
+TEST_CASE("picks: an empty alive mask behaves exactly like no mask") {
+    std::vector<Edge> edges = {{0, 5}, {2, 7}};
+    std::mt19937 rng_a(99), rng_b(99);
+    const auto a = pick_weakly_connected_triple(10, edges, rng_a);
+    const auto b = pick_weakly_connected_triple(10, edges, rng_b, {});
+    CHECK(a == b);
+}

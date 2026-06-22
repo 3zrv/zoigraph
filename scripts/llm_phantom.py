@@ -773,6 +773,13 @@ def cmd_emit(args: argparse.Namespace) -> int:
         # graph edges or pollute the wrong events table.
         "project":     Path(args.db).stem,
     }).encode("utf-8")
+    # The UDP listener caps datagrams at 1 KiB (kMaxPayload) and silently drops
+    # anything larger, so sending an oversized payload would print "done" while
+    # the phantom never appears. Fail loudly instead.
+    if len(payload) > 1024:
+        print(f"payload is {len(payload)} bytes, over the listener's 1024-byte "
+              f"cap -- not sending (shorten the label/content)", file=sys.stderr)
+        return 6
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.sendto(payload, (args.host, args.port))
     sock.close()

@@ -68,7 +68,8 @@ CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
     INSERT INTO nodes_fts(nodes_fts, rowid, title, content)
         VALUES ('delete', old.id, old.title, old.content);
 END;
-CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+DROP TRIGGER IF EXISTS nodes_au;
+CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE OF title, content ON nodes BEGIN
     INSERT INTO nodes_fts(nodes_fts, rowid, title, content)
         VALUES ('delete', old.id, old.title, old.content);
     INSERT INTO nodes_fts(rowid, title, content)
@@ -76,14 +77,20 @@ CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
 END;
 )SQL";
 
-// Turns user input into an FTS5 prefix-match query, dropping any character
-// that isn't alphanumeric so we don't have to escape FTS5 operator syntax.
+// Turns user input into an FTS5 prefix-match query. A token character is an
+// ASCII alphanumeric OR any byte of a multibyte UTF-8 sequence (>= 0x80) —
+// keeping the latter lets non-Latin titles (accented, Greek, CJK, ...) be
+// searched instead of sanitizing to nothing. Everything else (ASCII
+// punctuation, whitespace, and therefore every FTS5 operator, which is ASCII)
+// is dropped, so we never have to escape FTS5 syntax. The unicode61 tokenizer
+// does the real word-splitting on both the index and this query.
 // "foo bar" -> "foo* bar*".  Returns empty if nothing survives sanitization.
 std::string to_fts_query(const std::string& q) {
     std::string out;
     bool in_token = false;
     for (char c : q) {
-        if (std::isalnum(static_cast<unsigned char>(c))) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (std::isalnum(uc) || uc >= 0x80) {
             out += c;
             in_token = true;
         } else if (in_token) {
@@ -262,7 +269,9 @@ void Database::save_graph(const std::vector<StoredNode>& nodes,
 
         exec("COMMIT;");
     } catch (...) {
-        exec("ROLLBACK;");
+        // A failing ROLLBACK (e.g. the txn already aborted) must not replace
+        // the original exception that's about to propagate.
+        try { exec("ROLLBACK;"); } catch (...) {}
         throw;
     }
 }
@@ -395,7 +404,9 @@ void Database::insert_node(const StoredNode& n) {
         }
         exec("COMMIT;");
     } catch (...) {
-        exec("ROLLBACK;");
+        // A failing ROLLBACK (e.g. the txn already aborted) must not replace
+        // the original exception that's about to propagate.
+        try { exec("ROLLBACK;"); } catch (...) {}
         throw;
     }
 }
@@ -553,7 +564,9 @@ void Database::update_node_tags(long long id, const std::vector<std::string>& ta
         }
         exec("COMMIT;");
     } catch (...) {
-        exec("ROLLBACK;");
+        // A failing ROLLBACK (e.g. the txn already aborted) must not replace
+        // the original exception that's about to propagate.
+        try { exec("ROLLBACK;"); } catch (...) {}
         throw;
     }
 }

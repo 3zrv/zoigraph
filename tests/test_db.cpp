@@ -195,6 +195,46 @@ TEST_CASE("db: unicode survives roundtrip and is searchable by ascii prefix") {
     CHECK(db.search("espresso").size() == 1);
 }
 
+TEST_CASE("db: non-ASCII titles are searchable by their own tokens") {
+    Database db(":memory:");
+    db.save_graph({
+        {0, {0,0,0}, "café", "espresso"},
+        {1, {0,0,0}, "日本語", "japanese"},
+        {2, {0,0,0}, "αβγ", "greek"},
+    }, {});
+
+    // Each non-Latin title must be findable by its own characters — a CJK or
+    // Greek query previously sanitized to the empty string and returned nothing.
+    const auto jp = db.search("日本語");
+    REQUIRE(jp.size() == 1);
+    CHECK(jp[0] == 1);
+
+    const auto gr = db.search("αβγ");
+    REQUIRE(gr.size() == 1);
+    CHECK(gr[0] == 2);
+
+    const auto cafe = db.search("café");
+    REQUIRE(cafe.size() == 1);
+    CHECK(cafe[0] == 0);
+}
+
+TEST_CASE("db: nodes_au fires on title/content edits, not on a tier-only update") {
+    Database db(":memory:");
+    db.save_graph({{0, {0,0,0}, "alpha", "body"}}, {});
+
+    // A tier-only UPDATE must not corrupt or drop the FTS row (the narrowed
+    // trigger doesn't fire, and the row keeps its unchanged title/content).
+    db.update_node_tier(0, "suspected");
+    CHECK(db.search("alpha").size() == 1);
+    CHECK(db.search("body").size()  == 1);
+
+    // A title/content edit must still update the FTS index (the trigger fires).
+    db.update_node_text(0, "omega", "newbody", 1.0);
+    CHECK(db.search("alpha").empty());
+    CHECK(db.search("omega").size()   == 1);
+    CHECK(db.search("newbody").size() == 1);
+}
+
 TEST_CASE("db: search is case-insensitive") {
     Database db(":memory:");
     db.save_graph({{1, {0,0,0}, "Alpha", ""}}, {});

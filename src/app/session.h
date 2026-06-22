@@ -46,6 +46,16 @@ struct Session {
     // at startup (NOT per-project — it outlives project switches), written to
     // a 0600 file beside each opened project DB; open_project leaves it alone.
     std::string                                   query_token;
+
+    // The single place node ids are minted, so the id==index invariant has one
+    // owner. next_node_id() returns the id the next append_node() will assign
+    // (== the new vector index); callers that must know it before building the
+    // node (edge endpoints, a scatter seed) read it here instead of recomputing
+    // stored_nodes.size(). append_node() overwrites n.id with that id, appends
+    // the node, enqueues it into physics and persists it incrementally (both
+    // no-ops if those deps are null), and returns the assigned id.
+    long long next_node_id() const;
+    long long append_node(zg::persistence::StoredNode n);
 };
 
 // Tears down any in-progress session (stop physics, final save_graph,

@@ -1,11 +1,14 @@
 #include "app/promote.h"
 
+#include <unordered_set>
+
 namespace zg::app {
 
 PromotionResult promote_phantom(const zg::telemetry::Phantom& ph,
                                 long long new_id,
                                 double now_ts,
-                                std::size_t positions_size) {
+                                std::size_t positions_size,
+                                const std::vector<char>& alive) {
     PromotionResult out;
 
     out.node.id           = new_id;
@@ -16,12 +19,19 @@ PromotionResult promote_phantom(const zg::telemetry::Phantom& ph,
     out.node.last_touched = now_ts;
     out.node.tier         = "phantom";
 
+    const auto is_alive = [&alive](std::size_t i) {
+        return alive.empty() || (i < alive.size() && alive[i]);
+    };
+
+    std::unordered_set<std::size_t> seen;  // dedup repeated targets
     out.edges.reserve(ph.connections.size());
     for (const auto& c : ph.connections) {
         if (c.target < 0) continue;
         const auto tidx = static_cast<std::size_t>(c.target);
         if (tidx >= positions_size) continue;
         if (tidx == static_cast<std::size_t>(new_id)) continue;
+        if (!is_alive(tidx)) continue;            // no edges into a tombstone
+        if (!seen.insert(tidx).second) continue;  // first edge to a target wins
         // edge.kind is the model's proposed relationship type; the trust
         // signal stays at certainty="phantom" so the kind alone doesn't
         // imply validation. Operator promotes both by editing certainty

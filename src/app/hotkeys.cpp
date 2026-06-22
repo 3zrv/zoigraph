@@ -39,12 +39,24 @@ void handle_hotkeys(Session& s,
 
     const bool typing = ImGui::GetIO().WantTextInput;
 
+    // Tombstoned nodes must stay out of the bones triple and the rabbit path.
+    // Built lazily (only on an H/B press) from the soft-delete flags.
+    auto alive_mask = [&stored_nodes]() {
+        std::vector<char> a(stored_nodes.size());
+        for (std::size_t i = 0; i < stored_nodes.size(); ++i) {
+            a[i] = !stored_nodes[i].deleted;
+        }
+        return a;
+    };
+
     if (IsKeyPressed(KEY_H) && !typing && selected_node >= 0
         && static_cast<std::size_t>(selected_node) < positions.size()
+        && static_cast<std::size_t>(selected_node) < stored_nodes.size()
+        && !stored_nodes[static_cast<std::size_t>(selected_node)].deleted
         && !rabbit.active && !bones.active) {
         auto path = zg::macros::pick_rabbit_path(
             static_cast<std::size_t>(selected_node),
-            edges, rng, positions.size());
+            edges, rng, positions.size(), alive_mask());
         if (path.size() >= 2) {
             rabbit.active        = true;
             rabbit.path          = std::move(path);
@@ -56,7 +68,7 @@ void handle_hotkeys(Session& s,
 
     if (IsKeyPressed(KEY_B) && !typing && !rabbit.active && !bones.active
         && positions.size() >= 3) {
-        zg::macros::throw_bones(bones, positions, edges, camera, rng);
+        zg::macros::throw_bones(bones, positions, edges, camera, rng, alive_mask());
         // Only log on a successful throw -- pick_weakly_connected_triple
         // returns <3 ids when the graph can't supply a meaningful triple,
         // in which case bones.active stays false and the macro is a no-op.

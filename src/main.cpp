@@ -29,6 +29,7 @@
 #include "app/settings.h"
 #include "app/phantom_lifecycle.h"
 #include "app/pick.h"
+#include "app/paths.h"
 #include "app/session.h"
 #include "input/escape_wipe.h"
 #include "macros/bones.h"
@@ -127,11 +128,20 @@ int main() {
     crt_locs.resolution = GetShaderLocation(crt_shader, "resolution");
     crt_locs.time       = GetShaderLocation(crt_shader, "time");
 
+    // Resolve resource dirs against the CWD first, then the executable's own
+    // directory, so a relocated dist tarball (binary + scripts/ + projects/)
+    // works when launched from another CWD. A dev run from the repo root keeps
+    // using ./projects and ./scripts unchanged.
+    const std::filesystem::path kCwdDir = std::filesystem::current_path();
+    const char* kAppDirRaw = GetApplicationDirectory();
+    const std::filesystem::path kExeDir = kAppDirRaw ? kAppDirRaw : "";
+
     // Multi-project model: each project lives in projects/<name>.db. The
     // legacy single-file zoigraph.db is migrated into projects/default.db
     // on first run with this code. The last-opened project name is stored
     // in projects/.last so the next launch resumes there.
-    const std::filesystem::path kProjectsDir = "projects";
+    const std::filesystem::path kProjectsDir =
+        zg::app::resolve_resource("projects", kCwdDir, kExeDir);
     zg::persistence::migrate_legacy_db("zoigraph.db", kProjectsDir, "default");
 
     zg::graph::GraphBuffer            buffer;
@@ -190,6 +200,10 @@ int main() {
     // One auth secret per process for the read query channel; written 0600
     // beside each project DB on open so the LLM bridge can authenticate.
     session.query_token = zg::app::generate_session_token();
+    // Point the Ask worker at the resolved emitter script (next to the binary
+    // in a dist tarball, ./scripts in a dev run); it stats this before popen.
+    session.ask.set_script_path(
+        zg::app::resolve_resource("scripts/llm_phantom.py", kCwdDir, kExeDir).string());
     auto open_project = [&](const std::string& name) {
         bones.panel_open = false;
         rabbit.active    = false;
@@ -222,6 +236,14 @@ int main() {
         return true;  // bind lands async on the worker; poll listening()
     };
     cli_deps.port_listening = [&] { return telemetry->listening(); };
+    cli_deps.get_query_port = [&settings] { return settings.query_port; };
+    cli_deps.set_query_port = [&](int port) {
+        query_thread->stop();
+        query_thread = std::make_unique<zg::telemetry::QueryThread>(port);
+        query_thread->start();
+        return true;  // bind lands async on the worker; poll listening()
+    };
+    cli_deps.query_port_listening = [&] { return query_thread->listening(); };
     cli_deps.settings       = &settings;
     cli_deps.save_settings  = [&] {
         return zg::app::save_settings(kSettingsPath, settings);
@@ -272,7 +294,7 @@ int main() {
         // Positions-only snapshot — edges are owned by main so the buffer
         // doesn't clobber operator edits to label / kind / certainty.
         buffer.snapshot(positions);
-        phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, GetTime());
+        phantom_buffer.snapshot_and_expire(phantoms, kPhantomTtl, zg::app::mono_now());
 
         // Cross-project guard: phantoms tagged for another project are
         // dropped BEFORE the spawn diff ever sees them. An Ask launched in
@@ -318,7 +340,7 @@ int main() {
         // test_phantom_lifecycle); this loop just translates the delta
         // into log_event rows.
         const auto delta = zg::app::phantom_lifecycle_diff(
-            seen_phantom_spawn, phantoms, GetTime());
+            seen_phantom_spawn, phantoms, zg::app::mono_now());
         if (db) {
             for (std::size_t idx : delta.new_indices) {
                 const auto& ph = phantoms[idx];

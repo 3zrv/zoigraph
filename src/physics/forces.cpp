@@ -30,4 +30,16 @@ Vector3 hooke_force(Vector3 a, Vector3 b, float rest_length, float stiffness) {
     return {dx / r * magnitude, dy / r * magnitude, dz / r * magnitude};
 }
 
+float mean_speed_squared(const std::vector<Vector3>& velocities) {
+    if (velocities.empty()) return 0.0f;
+    // Accumulate in double — at 100k+ nodes a float sum loses low bits.
+    double sum = 0.0;
+    for (const Vector3& v : velocities) {
+        sum += static_cast<double>(v.x) * v.x
+             + static_cast<double>(v.y) * v.y
+             + static_cast<double>(v.z) * v.z;
+    }
+    return static_cast<float>(sum / static_cast<double>(velocities.size()));
+}
+
 }  // namespace zg::physics

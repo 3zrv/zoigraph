@@ -73,6 +73,9 @@ struct CliDeps {
     std::function<int()>                       get_port;
     std::function<bool(int)>                   set_port;        // restart listener on a new port
     std::function<bool()>                      port_listening;  // did the listener bind?
+    std::function<int()>                       get_query_port;
+    std::function<bool(int)>                   set_query_port;       // rebind the query channel
+    std::function<bool()>                      query_port_listening; // did the query socket bind?
     zg::app::Settings*                         settings = nullptr;
     std::function<bool()>                      save_settings;   // flush settings to disk
     std::function<void(int, int)>              set_window_size; // live-resize the OS window

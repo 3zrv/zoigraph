@@ -8,17 +8,25 @@ namespace zg::graph {
 std::vector<std::size_t> label_propagation(
     std::size_t node_count,
     const std::vector<Edge>& edges,
-    int max_iters) {
+    int max_iters,
+    const std::vector<char>& alive) {
     std::vector<std::size_t> labels(node_count);
     for (std::size_t i = 0; i < node_count; ++i) labels[i] = i;
 
     if (node_count == 0) return labels;
 
-    // Build adjacency lists (undirected, no self-loops, in-bounds only).
+    const auto is_alive = [&alive](std::size_t i) {
+        return alive.empty() || (i < alive.size() && alive[i]);
+    };
+
+    // Build adjacency lists (undirected, no self-loops, in-bounds only). Edges
+    // touching a tombstoned node are dropped, so a deleted node has no
+    // neighbours — it keeps its initial label and influences no one.
     std::vector<std::vector<std::size_t>> adj(node_count);
     for (const Edge& e : edges) {
         if (e.source >= node_count || e.target >= node_count) continue;
         if (e.source == e.target) continue;
+        if (!is_alive(e.source) || !is_alive(e.target)) continue;
         adj[e.source].push_back(e.target);
         adj[e.target].push_back(e.source);
     }

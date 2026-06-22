@@ -67,7 +67,7 @@ void render_toolbar_tab(zg::app::Session& s,
             tb_node_msg = "no active project";
         } else {
             const double now_ts = zg::app::unix_now();
-            const long long new_id = static_cast<long long>(stored_nodes.size());
+            const long long new_id = s.next_node_id();
             const bool link = tb_node_link_sel && can_link;
             const float angle = 0.7f * static_cast<float>(new_id);
             Vector3 spawn{
@@ -87,16 +87,13 @@ void render_toolbar_tab(zg::app::Session& s,
                 };
             }
             zg::persistence::StoredNode n{};
-            n.id           = new_id;
             n.position     = spawn;
             n.title        = tb_node_title;
             n.content      = "";
             n.first_seen   = now_ts;
             n.last_touched = now_ts;
             n.tier         = kToolbarTiers[tb_node_tier_idx];
-            stored_nodes.push_back(std::move(n));
-            physics->enqueue_node(spawn);
-            db->insert_node(stored_nodes.back());
+            s.append_node(std::move(n));  // mints id == new_id, enqueues physics, inserts db
             if (link) {
                 const std::size_t sel = static_cast<std::size_t>(selected_node);
                 const zg::graph::Edge e{
@@ -133,7 +130,7 @@ void render_toolbar_tab(zg::app::Session& s,
         p.id         = tb_phantom_id_counter++;
         p.position   = {0.0f, 6.0f, 0.0f};
         p.label      = tb_phantom_label.empty() ? "(local)" : tb_phantom_label;
-        p.spawn_time = GetTime();
+        p.spawn_time = zg::app::mono_now();
         phantom_buffer.add(p);
         tb_phantom_msg = "injected id " + std::to_string(p.id);
         tb_phantom_label.clear();
@@ -165,7 +162,7 @@ void render_toolbar_tab(zg::app::Session& s,
             char tbuf[32];
             std::strftime(tbuf, sizeof(tbuf), "journal-%Y%m%d-%H%M%S",
                           std::localtime(&tt));
-            const long long new_id = static_cast<long long>(stored_nodes.size());
+            const long long new_id = s.next_node_id();
             const float ang = 0.5f * static_cast<float>(new_id);
             Vector3 anchor{0.0f, 0.0f, 0.0f};
             if (self_idx < positions.size()) anchor = positions[self_idx];
@@ -175,7 +172,6 @@ void render_toolbar_tab(zg::app::Session& s,
                 anchor.z + 3.0f * std::sin(ang),
             };
             zg::persistence::StoredNode jn{};
-            jn.id           = new_id;
             jn.position     = spawn;
             jn.title        = tbuf;
             jn.content      = tb_journal_text;
@@ -183,9 +179,7 @@ void render_toolbar_tab(zg::app::Session& s,
             jn.last_touched = now_ts;
             jn.tier         = "confirmed";
             jn.tags         = {"journal"};
-            stored_nodes.push_back(std::move(jn));
-            physics->enqueue_node(spawn);
-            db->insert_node(stored_nodes.back());
+            s.append_node(std::move(jn));  // mints id == new_id, enqueues physics, inserts db
 
             if (self_idx < stored_nodes.size()) {
                 const zg::graph::Edge e_self{

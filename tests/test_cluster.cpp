@@ -91,3 +91,25 @@ TEST_CASE("label_propagation: clusters of a barbell graph form correctly") {
     CHECK(labels[3] == labels[4]);
     CHECK(labels[4] == labels[5]);
 }
+
+TEST_CASE("label_propagation: a deleted node doesn't bridge two communities") {
+    // 0-1 and 2-3 are separate pairs; node 4 (deleted) bridges them via 4-1
+    // and 4-2. Alive, that bridge merges everything into one community; deleted,
+    // its edges drop and the two pairs stay distinct.
+    const std::vector<Edge> edges = {{0, 1}, {2, 3}, {4, 1}, {4, 2}};
+
+    const auto merged = label_propagation(5, edges, 50);
+    CHECK(merged[0] == merged[3]);  // bridged through the live node 4
+
+    const std::vector<char> alive = {1, 1, 1, 1, 0};  // node 4 dead
+    const auto split = label_propagation(5, edges, 50, alive);
+    CHECK(split[0] == split[1]);
+    CHECK(split[2] == split[3]);
+    CHECK(split[0] != split[2]);  // bridge gone -> two communities
+    CHECK(split[4] == 4u);        // the dead node keeps its singleton label
+}
+
+TEST_CASE("label_propagation: an empty alive mask behaves exactly like no mask") {
+    const std::vector<Edge> edges = {{0, 1}, {1, 2}, {3, 4}};
+    CHECK(label_propagation(5, edges, 50) == label_propagation(5, edges, 50, {}));
+}

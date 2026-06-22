@@ -31,6 +31,7 @@
 
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <sstream>
 #include <utility>
 
@@ -150,12 +151,36 @@ void LlmAsk::start(std::string db_path, long long anchor_id) {
     });
 }
 
+void LlmAsk::set_script_path(std::string path) {
+    std::lock_guard<std::mutex> g(mu_);
+    script_path_ = std::move(path);
+}
+
 LlmAsk::Snapshot LlmAsk::snapshot() const {
     std::lock_guard<std::mutex> g(mu_);
     return {state_, msg_};
 }
 
 void LlmAsk::run(std::string db_path, long long anchor_id) {
+    std::string script;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        script = script_path_;
+    }
+
+    // Fail clearly if the emitter script isn't where we resolved it to be
+    // (a partial install, or a dist tarball missing scripts/) rather than
+    // surfacing python's opaque "can't open file" through the subprocess.
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(script, ec)) {
+            std::lock_guard<std::mutex> g(mu_);
+            state_ = State::ErrSubprocess;
+            msg_   = "emitter script not found: " + script;
+            return;
+        }
+    }
+
     if (!tcp_probe_localhost(11434)) {
         std::lock_guard<std::mutex> g(mu_);
         state_ = State::ErrNoOllama;
@@ -165,10 +190,10 @@ void LlmAsk::run(std::string db_path, long long anchor_id) {
     }
 
     // Command assembly: project name validator restricts the path to
-    // [A-Za-z0-9_-] so shell metacharacters can't appear; quoting is
-    // defence-in-depth, not load-bearing.
+    // [A-Za-z0-9_-] so shell metacharacters can't appear; the script path is
+    // resolved by main and quoted. Quoting is defence-in-depth, not load-bearing.
     std::ostringstream cmd;
-    cmd << "python3 scripts/llm_phantom.py emit "
+    cmd << "python3 \"" << script << "\" emit "
         << "--backend ollama --model llama3.2:3b "
         << "--db \"" << db_path << "\" "
         << "--anchor-id " << anchor_id << " "

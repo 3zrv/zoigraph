@@ -18,9 +18,14 @@ namespace zg::physics {
 // `forces_out` is added to, not overwritten — caller pre-sizes to match
 // `positions` and may have other force contributions already accumulated
 // (Hooke, centering, phantom repulsion).
+//
+// `disabled` (empty == none) masks out tombstoned nodes: a disabled node is
+// kept out of the tree (it exerts no repulsion) and receives no force. Indices
+// past the mask's end are treated as enabled.
 void apply_barnes_hut_repulsion(const std::vector<Vector3>& positions,
                                 std::vector<Vector3>& forces_out,
                                 float repulsion_k,
-                                float theta);
+                                float theta,
+                                const std::vector<char>& disabled = {});
 
 }  // namespace zg::physics
