@@ -65,6 +65,53 @@ def load_nodes(db_path: str) -> list[Node]:
 
 
 # ---------------------------------------------------------------------------
+# Query channel (the production context path: ask a running zoigraph instead
+# of reading the DB file directly -- so we get PPR-ranked relevance, and the
+# DB can be encrypted at rest later without handing a key to this process)
+# ---------------------------------------------------------------------------
+
+def read_query_token(db_path: str) -> str:
+    """The session auth token zoigraph wrote next to the project DB
+    (<db>.token), or "" if absent."""
+    try:
+        return Path(str(db_path) + ".token").read_text().strip()
+    except OSError:
+        return ""
+
+
+def query_neighborhood(host: str, port: int, token: str, anchor_id: int,
+                       hops: int, timeout: float = 5.0) -> Optional[list[Node]]:
+    """Ask a running zoigraph's query channel for the anchor's relevance
+    neighbourhood (personalized PageRank, anchor first). Returns the nodes, or
+    None if the channel doesn't answer (app not running, bad token, unknown id,
+    malformed reply) so the caller can fall back to a direct DB read."""
+    req = {"q": "neighborhood", "req": 1, "id": anchor_id,
+           "hops": hops, "token": token}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.sendto(json.dumps(req).encode(), (host, port))
+        data, _ = sock.recvfrom(65536)
+    except (socket.timeout, OSError):
+        return None
+    finally:
+        sock.close()
+    try:
+        reply = json.loads(data.decode())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(reply, dict) or "error" in reply:
+        return None
+    out = []
+    for n in reply.get("nodes", []):
+        out.append(Node(n["id"], n.get("title", ""), n.get("content", ""),
+                        float(n.get("x", 0.0)), float(n.get("y", 0.0)),
+                        float(n.get("z", 0.0))))
+    return out or None
+
+
+# ---------------------------------------------------------------------------
 # Prompt + context selection
 # ---------------------------------------------------------------------------
 
@@ -628,23 +675,43 @@ def _source_tag(backend_name: str, model: str) -> str:
 
 def cmd_emit(args: argparse.Namespace) -> int:
     rng = random.Random(args.seed)
-    nodes = load_nodes(args.db)
-    if len(nodes) < args.k:
-        print(f"need at least {args.k} nodes in {args.db}", file=sys.stderr)
-        return 2
-    if args.anchor_id is not None:
-        # Used by the Ask-about-selection button: caller specifies which
-        # node the LLM should reason about. Fail loudly if the id is wrong
-        # so the C++ side can surface a useful error.
-        match = [n for n in nodes if n.id == args.anchor_id]
-        if not match:
-            print(f"--anchor-id {args.anchor_id} not found in {args.db}",
+    context = None
+    # Production path: ask a running zoigraph for the anchor's relevance
+    # neighbourhood over the query channel. No direct DB read (keeps the
+    # SQLCipher swap-in clean), and the context is PPR-ranked, not spatial.
+    if args.anchor_id is not None and not args.no_channel:
+        token = read_query_token(args.db)
+        if not token:
+            print(f"no query token at {args.db}.token -- falling back to DB read",
                   file=sys.stderr)
-            return 4
-        anchor = match[0]
-    else:
-        anchor = rng.choice(nodes)
-    context = pick_context(nodes, anchor, args.k, rng)
+        else:
+            ctx = query_neighborhood(args.host, args.query_port, token,
+                                     args.anchor_id, args.hops)
+            if ctx:
+                context = ctx
+                print(f"=== context via query channel: {len(context)} nodes "
+                      f"(anchor id={context[0].id}) ===")
+            else:
+                print("query channel unreachable/empty -- falling back to DB read",
+                      file=sys.stderr)
+    if context is None:
+        # Fallback (app not running / --no-channel / no anchor): read the DB
+        # and pick a spatial slice, as the phase-1 measure harness does.
+        nodes = load_nodes(args.db)
+        if len(nodes) < args.k:
+            print(f"need at least {args.k} nodes in {args.db}", file=sys.stderr)
+            return 2
+        if args.anchor_id is not None:
+            # Fail loudly on a bad id so the C++ side surfaces a useful error.
+            match = [n for n in nodes if n.id == args.anchor_id]
+            if not match:
+                print(f"--anchor-id {args.anchor_id} not found in {args.db}",
+                      file=sys.stderr)
+                return 4
+            anchor = match[0]
+        else:
+            anchor = rng.choice(nodes)
+        context = pick_context(nodes, anchor, args.k, rng)
     prompt = build_prompt(context)
     backend = make_backend(args.backend, args.model, args.failure_rate, rng)
     raw = backend.generate(prompt)
@@ -681,6 +748,16 @@ def cmd_emit(args: argparse.Namespace) -> int:
                 "target": c["target"],
                 "kind": c.get("kind", "") if isinstance(c.get("kind"), str) else "",
             })
+    # Place the phantom at the centroid of the referents the model actually
+    # chose (positions come from the context we supplied), overriding its
+    # guessed (x,y,z) so the phantom always materialises among the nodes it
+    # connects -- more reliable than trusting the model's spatial reasoning.
+    pos_by_id = {n.id: (n.x, n.y, n.z) for n in context}
+    pts = [pos_by_id[c["target"]] for c in norm_conns if c["target"] in pos_by_id]
+    if pts:
+        data["x"] = sum(p[0] for p in pts) / len(pts)
+        data["y"] = sum(p[1] for p in pts) / len(pts)
+        data["z"] = sum(p[2] for p in pts) / len(pts)
     payload = json.dumps({
         "id":          data["id"],
         "x":           data["x"],
@@ -863,6 +940,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     pe.add_argument("--anchor-id", type=int, default=None,
                     help="pin the prompt anchor to a specific node id "
                          "(default: random). used by the in-app Ask button.")
+    pe.add_argument("--query-port", type=int, default=7778,
+                    help="port of the running zoigraph's read query channel "
+                         "(default: 7778). context is fetched from it when "
+                         "--anchor-id is given.")
+    pe.add_argument("--hops", type=int, default=2,
+                    help="neighbourhood size hint for the query channel "
+                         "(scales how many relevant nodes come back)")
+    pe.add_argument("--no-channel", action="store_true",
+                    help="skip the query channel and read context straight "
+                         "from the DB (for standalone emit without a running app)")
     pe.set_defaults(func=cmd_emit)
 
     pm = sub.add_parser("measure", parents=[common],

@@ -341,6 +341,13 @@ bool Database::load_graph(std::vector<StoredNode>& nodes,
     return !nodes.empty();
 }
 
+std::size_t first_noncontiguous_id(const std::vector<StoredNode>& nodes) {
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].id != static_cast<long long>(i)) return i;
+    }
+    return nodes.size();
+}
+
 void Database::insert_node(const StoredNode& n) {
     exec("BEGIN IMMEDIATE;");
     try {

@@ -52,8 +52,12 @@
 #include "persistence/secure_wipe.h"
 #include "persistence/seed.h"
 #include "physics/physics_thread.h"
+#include "app/query_responder.h"
+#include "app/query_token.h"
 #include "telemetry/phantom.h"
 #include "telemetry/phantom_buffer.h"
+#include "telemetry/query_protocol.h"
+#include "telemetry/query_thread.h"
 #include "telemetry/telemetry_thread.h"
 
 #include <filesystem>
@@ -138,6 +142,14 @@ int main() {
         settings.telemetry_port, phantom_buffer);
     telemetry->start();
 
+    // Read query channel: the LLM bridge asks the live graph for an anchor's
+    // neighbourhood / search / a node, instead of reading the DB file directly
+    // (which also keeps the SQLCipher swap-in clean later). Sibling loopback
+    // socket on its own port; the render loop drains + answers it each frame.
+    auto query_thread = std::make_unique<zg::telemetry::QueryThread>(
+        settings.query_port);
+    query_thread->start();
+
     // All per-project state lives in Session; aliases below let the rest of
     // main.cpp keep using the short names while open_project repopulates
     // everything on each switch.
@@ -175,10 +187,16 @@ int main() {
     // the bones scratch panel and cancels any in-flight rabbit hole. The
     // Session-owned resets (selected_node, search_*, etc.) happen inside
     // zg::app::open_project itself.
+    // One auth secret per process for the read query channel; written 0600
+    // beside each project DB on open so the LLM bridge can authenticate.
+    session.query_token = zg::app::generate_session_token();
     auto open_project = [&](const std::string& name) {
         bones.panel_open = false;
         rabbit.active    = false;
         zg::app::open_project(session, name, kProjectsDir, buffer, phantom_buffer);
+        zg::app::write_token_file(
+            zg::persistence::project_path(kProjectsDir, name).string() + ".token",
+            session.query_token);
     };
     open_project(zg::persistence::read_last_project(kProjectsDir, "default"));
     std::mt19937                     rabbit_rng(std::random_device{}());
@@ -232,6 +250,24 @@ int main() {
         zg::app::handle_hotkeys(session, camera, esc_exit, kEscWindow,
                                 rabbit, bones, rabbit_rng, requested_exit,
                                 show_all_labels);
+
+        // Query channel: answer the LLM bridge's reads (node / search /
+        // neighbourhood) from our own live graph, on this thread — the socket
+        // thread never touches graph data. drain() hands us the batch received
+        // since last frame; answer_query enforces the auth token and tombstone
+        // filtering, and a dropped (bad/empty-token) request gets no reply.
+        {
+            auto search_fn = [&](const std::string& text) -> std::vector<long long> {
+                return db ? db->search(text) : std::vector<long long>{};
+            };
+            for (auto& iq : query_thread->drain()) {
+                auto resp = zg::app::answer_query(iq.request, session.query_token,
+                                                  stored_nodes, edges, search_fn);
+                if (!resp) continue;
+                query_thread->send_reply(
+                    iq.reply_to, zg::telemetry::serialize_response(*resp));
+            }
+        }
 
         // Positions-only snapshot — edges are owned by main so the buffer
         // doesn't clobber operator edits to label / kind / certainty.
@@ -418,6 +454,7 @@ int main() {
     }
 
     telemetry->stop();
+    query_thread->stop();
     if (physics) physics->stop();
 
     if (requested_panic) {

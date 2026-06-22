@@ -23,6 +23,14 @@ struct StoredNode {
     bool                     deleted      = false;        // soft-delete tombstone; renderer + inspector skip these
 };
 
+// The app addresses nodes by their position in the loaded vector — edges store
+// source/target as indices, not ids (the "id == vector index" model). Database
+// itself is id-agnostic (load_graph round-trips arbitrary ids for storage
+// tests), so the app verifies the invariant at project-open time. Returns the
+// first index `i` where `nodes[i].id != i`, or nodes.size() when every id is
+// contiguous 0..N-1. Pure; doctest-covered.
+std::size_t first_noncontiguous_id(const std::vector<StoredNode>& nodes);
+
 // Thin wrapper around a SQLite connection. The schema is the eventual home
 // for everything that needs to survive a process restart: node positions,
 // titles, markdown content, edges. SQLCipher will swap in transparently when

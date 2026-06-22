@@ -1,6 +1,10 @@
 #include "app/session.h"
 
+#include <stdexcept>
+#include <string>
+
 #include "app/clock.h"
+#include "persistence/db.h"
 #include "persistence/project_store.h"
 #include "persistence/seed.h"
 
@@ -41,6 +45,20 @@ void open_project(Session& s,
     std::vector<zg::graph::Edge> initial_edges;
     std::vector<Vector3>         initial_positions;
     if (s.db->load_graph(s.stored_nodes, initial_edges)) {
+        // id == vector index is load-bearing: edges store source/target as
+        // indices into stored_nodes, not ids. An externally-edited DB with a
+        // gap or out-of-order id would silently mis-point every edge and then
+        // crash on the next pin (PK collision). Refuse to open instead — no
+        // silent remap (that belongs to a future import/merge path).
+        if (std::size_t bad = zg::persistence::first_noncontiguous_id(s.stored_nodes);
+            bad != s.stored_nodes.size()) {
+            throw std::runtime_error(
+                "project '" + name + "': node ids must be contiguous 0..N-1 "
+                "(id==index is load-bearing). First mismatch at position "
+                + std::to_string(bad) + " has id "
+                + std::to_string(s.stored_nodes[bad].id)
+                + " — the DB was likely edited externally.");
+        }
         initial_positions.reserve(s.stored_nodes.size());
         for (const auto& sn : s.stored_nodes) initial_positions.push_back(sn.position);
     } else {

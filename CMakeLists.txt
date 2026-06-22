@@ -159,6 +159,8 @@ add_library(zg_app STATIC
     src/app/ask.cpp
     src/app/promote.cpp
     src/app/phantom_lifecycle.cpp
+    src/app/query_responder.cpp
+    src/app/query_token.cpp
     src/app/settings.cpp
 )
 target_include_directories(zg_app PUBLIC src)
@@ -217,6 +219,7 @@ add_library(zg_graph STATIC
     src/graph/wikilinks.cpp
     src/graph/cluster.cpp
     src/graph/timeline.cpp
+    src/graph/ppr.cpp
 )
 target_include_directories(zg_graph PUBLIC src)
 target_link_libraries(zg_graph PUBLIC raylib)
@@ -245,6 +248,8 @@ target_link_libraries(zg_persistence PUBLIC zg_graph sqlite3 raylib)
 add_library(zg_telemetry STATIC
     src/telemetry/phantom_buffer.cpp
     src/telemetry/phantom_parse.cpp
+    src/telemetry/query_protocol.cpp
+    src/telemetry/query_thread.cpp
     src/telemetry/telemetry_thread.cpp
 )
 target_include_directories(zg_telemetry PUBLIC src)

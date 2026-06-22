@@ -41,6 +41,11 @@ struct Session {
     int                                           selected_node  = -1;
     std::string                                   search_query;
     std::vector<long long>                        search_hits;
+
+    // Per-session auth secret for the read query channel. Set once in main()
+    // at startup (NOT per-project — it outlives project switches), written to
+    // a 0600 file beside each opened project DB; open_project leaves it alone.
+    std::string                                   query_token;
 };
 
 // Tears down any in-progress session (stop physics, final save_graph,

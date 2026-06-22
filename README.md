@@ -1,7 +1,9 @@
 # zoigraph
 
-A native, air-gapped 3D force-directed personal knowledge base and
-situational-awareness map. Static nodes persist in a local SQLite database;
+A native 3D force-directed personal knowledge base and situational-awareness
+map, designed for local-only (air-gapped) use — at-rest encryption is on the
+roadmap (SQLCipher), not yet a delivered guarantee. Static nodes persist in a
+local SQLite database;
 ephemeral "phantom" nodes can be injected over a loopback UDP socket and
 decay over a TTL. Edges carry a label, a kind, and a certainty that drives
 render alpha. Multi-project — each project is its own DB file under
@@ -168,11 +170,13 @@ dropped, not parsed-truncated.
 ## LLM bridge
 
 The inspector's **"ask about selection"** button is the in-app path: it
-serialises the selected node + its spatial neighbourhood, shells out to
-`scripts/llm_phantom.py emit`, and lets the response land via the normal
-UDP listener. A 100 ms TCP probe against `127.0.0.1:11434` runs first so
-a missing Ollama daemon surfaces a red error inline rather than hanging.
-Backend hardcoded to `ollama:llama3.2:3b` for now.
+shells out to `scripts/llm_phantom.py emit --anchor-id <id>`, which pulls
+the selected node's **relevance neighbourhood** from the running app over
+the query channel (see below), builds a prompt from it, and lets the
+response land via the normal UDP listener. A 100 ms TCP probe against
+`127.0.0.1:11434` runs first so a missing Ollama daemon surfaces a red
+error inline rather than hanging. Backend hardcoded to
+`ollama:llama3.2:3b` for now.
 
 External agents can drip phantoms from any source:
 
@@ -186,6 +190,29 @@ python3 scripts/llm_phantom.py emit \
 The script enforces a strict JSON schema before sending and tags every
 emission with `source="<backend>:<model>"` so the analysis can break pin
 rate down by emitter (the ceiling-vs-floor comparison between models).
+
+### Query channel
+
+A second loopback listener — a UDP request/response channel on
+`127.0.0.1:7778` (configurable via `query_port` in `settings.json`) — lets
+the LLM bridge read the **live** graph instead of opening the SQLite file
+directly. Three read queries, one JSON object per datagram:
+
+- `{"q":"neighborhood","id":<id>,"hops":<n>,"token":"…"}` — the anchor plus
+  its most relevant neighbours, ranked by **personalized PageRank** (graph
+  relevance, not raw spatial proximity), with the edges among them.
+- `{"q":"search","text":"…","token":"…"}` — FTS5 hits.
+- `{"q":"node","id":<id>,"token":"…"}` — one node.
+
+Replies exclude tombstoned nodes and truncate each node's content so they
+fit a single datagram. The render thread answers from its own data once
+per frame; the socket thread never touches the graph. Each request must
+carry a per-session **token** the app writes (mode `0600`) to
+`<db>.db.token` on open — the read channel exposes node content, so an
+unauthenticated caller is dropped with no reply. This also keeps the
+eventual SQLCipher swap-in clean: the emitter never needs the DB key.
+`emit` falls back to a direct DB read when the channel is unreachable (no
+running app, or `--no-channel`).
 
 ### Events table
 
@@ -217,9 +244,10 @@ work).
 (cd build && ctest --output-on-failure)
 ```
 
-Twenty-one doctest binaries: `forces`, `integrator`, `barnes_hut`,
-`graph_buffer`, `picks`, `cluster`, `timeline`, `wikilinks`, `escape_wipe`,
-`db`, `project_store`, `secure_wipe`, `seed`, `settings`, `phantom`, `ask`,
+Twenty-five doctest binaries: `forces`, `integrator`, `barnes_hut`,
+`graph_buffer`, `picks`, `cluster`, `ppr`, `timeline`, `wikilinks`,
+`escape_wipe`, `db`, `project_store`, `secure_wipe`, `seed`, `settings`,
+`phantom`, `query_protocol`, `query_responder`, `query_token`, `ask`,
 `promote`, `phantom_lifecycle`, `labels`, `cli`, plus a placeholder sanity
 check.
 
@@ -229,7 +257,8 @@ useful unit-test path without a window).
 
 ## Architecture
 
-Three threads, no IPC, no fibers, no third-party concurrency lib:
+Three render/physics/telemetry threads plus a query-channel listener, no
+IPC, no fibers, no third-party concurrency lib:
 
 1. **Main / render** — raylib window, Camera3D, instanced node draw via
    a GLSL 330 vs/fs pair (one draw call for the whole field, split into
@@ -243,6 +272,10 @@ Three threads, no IPC, no fibers, no third-party concurrency lib:
 3. **Telemetry** — UDP socket polled on a 100 ms tick (POSIX `poll`,
    `WSAPoll` on Windows), JSON → `Phantom` pushed into a TTL-expiring
    `PhantomBuffer`.
+4. **Query channel** — sibling UDP request/response socket on `:7778`
+   (same platform shim, `recvfrom`/`sendto`). The socket thread only moves
+   bytes through a mailbox; the render thread drains it once per frame and
+   answers reads (PPR neighbourhood / FTS search / node) from its own data.
 
 Persistence is plain SQLite (with FTS5) at `projects/<name>.db`. The
 schema covers `nodes` (with tier + soft-delete tombstone), `edges`
@@ -277,11 +310,14 @@ src/
 │   ├── promote.{h,cpp}               # pure phantom→StoredNode promotion (tested)
 │   ├── phantom_lifecycle.{h,cpp}     # per-frame spawn/decay diff (tested)
 │   ├── settings.{h,cpp}              # persisted operator settings (tested)
-│   └── ask.{h,cpp}                   # LLM Ask button: TCP probe + popen
+│   ├── ask.{h,cpp}                   # LLM Ask button: TCP probe + popen
+│   ├── query_responder.{h,cpp}       # answer channel reads from the live graph (tested)
+│   └── query_token.{h,cpp}           # per-session 0600 auth token (tested)
 ├── graph/                            # types, thread-safe buffer, pure algos
 │   ├── graph_buffer.{h,cpp}          # mutex-guarded positions handoff
 │   ├── picks.{h,cpp}                 # weakly-connected triple picker
 │   ├── cluster.{h,cpp}               # label-propagation
+│   ├── ppr.{h,cpp}                   # personalized PageRank for relevance (tested)
 │   ├── timeline.{h,cpp}              # first_seen → y-z spiral disc layout
 │   └── wikilinks.{h,cpp}             # [[title]] parser
 ├── input/escape_wipe.{h,cpp}         # triple-ESC-to-exit state machine
@@ -310,7 +346,9 @@ src/
 │   ├── phantom.{h,cpp}               # Phantom + Connection structs
 │   ├── phantom_parse.{h,cpp}         # JSON → Phantom (both connection shapes)
 │   ├── phantom_buffer.{h,cpp}        # TTL-expiring shared buffer
-│   └── telemetry_thread.{h,cpp}
+│   ├── telemetry_thread.{h,cpp}      # Thread 3 UDP phantom listener
+│   ├── query_protocol.{h,cpp}        # query-channel wire format (tested)
+│   └── query_thread.{h,cpp}          # :7778 request/response socket + mailbox
 └── ui/                               # ImGui tab/panel renderers
     ├── project_tab.{h,cpp}
     ├── inspector_tab.{h,cpp}

@@ -14,6 +14,7 @@ struct Settings {
     bool post_process   = true;   // CRT shader composite
     bool dim_filtered   = true;   // dim non-matching nodes under a tag filter
     int  telemetry_port = 7777;   // UDP phantom listener port
+    int  query_port     = 7778;   // UDP read query-channel listener port
     int  window_w       = 1280;   // window size: restored at launch, captured
     int  window_h       = 800;    // on clean exit, settable via /set size
 };

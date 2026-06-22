@@ -1127,3 +1127,18 @@ TEST_CASE("db: log_event timestamps are monotonically non-decreasing") {
     sqlite3_close(raw);
     std::remove(path.c_str());
 }
+
+TEST_CASE("db: first_noncontiguous_id flags the app's id==index invariant") {
+    using zg::persistence::first_noncontiguous_id;
+    auto ids = [](std::vector<long long> v) {
+        std::vector<StoredNode> nodes;
+        nodes.reserve(v.size());
+        for (long long id : v) { StoredNode n{}; n.id = id; nodes.push_back(n); }
+        return nodes;
+    };
+    CHECK(first_noncontiguous_id(ids({})) == 0);            // empty: vacuously contiguous
+    CHECK(first_noncontiguous_id(ids({0, 1, 2, 3})) == 4);  // contiguous → size()
+    CHECK(first_noncontiguous_id(ids({0, 1, 3})) == 2);     // interior gap
+    CHECK(first_noncontiguous_id(ids({1, 2, 3})) == 0);     // starts at 1
+    CHECK(first_noncontiguous_id(ids({0, 1, 2, 5})) == 3);  // tail gap
+}

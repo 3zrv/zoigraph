@@ -32,6 +32,10 @@ Settings load_settings(const std::filesystem::path& p) {
         const int port = j["telemetry_port"].get<int>();
         if (port >= 1 && port <= 65535) s.telemetry_port = port;
     }
+    if (j.contains("query_port") && j["query_port"].is_number_integer()) {
+        const int port = j["query_port"].get<int>();
+        if (port >= 1 && port <= 65535) s.query_port = port;
+    }
     if (j.contains("window_w") && j["window_w"].is_number_integer()) {
         const int w = j["window_w"].get<int>();
         if (w >= kMinWindowW && w <= kMaxWindowW) s.window_w = w;
@@ -49,6 +53,7 @@ bool save_settings(const std::filesystem::path& p, const Settings& s) {
         {"post_process",   s.post_process},
         {"dim_filtered",   s.dim_filtered},
         {"telemetry_port", s.telemetry_port},
+        {"query_port",     s.query_port},
         {"window_w",       s.window_w},
         {"window_h",       s.window_h},
     };
