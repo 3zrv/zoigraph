@@ -12,9 +12,12 @@ compile_commands.json
 imgui.ini
 __pycache__/
 results/
-zoigraph.db
-zoigraph.db-journal
-zoigraph.db-wal
-zoigraph.db-shm
+
 projects/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.token
+.last
 settings.json
