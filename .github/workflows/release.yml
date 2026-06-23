@@ -15,7 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pin to the oldest supported runner (GLIBC 2.35) instead of
+          # ubuntu-latest (24.04 / GLIBC 2.39). The binary links against the
+          # build host's glibc, so building on a newer host makes the release
+          # fail with "GLIBC_2.3x not found" on older distros (Ubuntu 22.04,
+          # Debian 12, etc.). 2.35 is a sane backward-compatible floor.
+          - os: ubuntu-22.04
             asset_name: zoigraph-linux-x86_64
             archive_ext: tar.gz
             binary: zoigraph
