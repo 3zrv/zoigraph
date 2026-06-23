@@ -18,7 +18,10 @@ LLM bridge (CLI `--backend claude`, off unless you ask for it) that sends prompt
 context to Anthropic's API — see [LLM bridge](#llm-bridge). At-rest encryption
 (SQLCipher) is on the roadmap, not yet a delivered guarantee.
 
-> Work in progress.
+[zoigraph.png](https://i.postimg.cc/JHBCj3g3/zg.png)
+[![CTEacCX.md.png](https://iili.io/CTEacCX.md.png)](https://freeimage.host/i/CTEacCX)
+
+> work in progress
 
 ## Build
 
