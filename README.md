@@ -12,9 +12,11 @@ edge certainty + UDP-only injection — keeps model output visually marked as
 provisional until a human pins it, and every pin / decay / edit / delete /
 bones-throw is logged to a per-project `events` table for analysis.
 
-Built for local-only (air-gapped) use: on the production path nothing leaves
-the machine. At-rest encryption (SQLCipher) is on the roadmap, not yet a
-delivered guarantee.
+Built for local-only (air-gapped) use: on the default path nothing leaves the
+machine. The repo also ships an optional, non-default `claude` backend for the
+LLM bridge (CLI `--backend claude`, off unless you ask for it) that sends prompt
+context to Anthropic's API — see [LLM bridge](#llm-bridge). At-rest encryption
+(SQLCipher) is on the roadmap, not yet a delivered guarantee.
 
 > Work in progress.
 
@@ -186,6 +188,15 @@ The script enforces a strict JSON schema before sending and tags every emission
 with `source="<backend>:<model>"`, so the analysis can break pin rate down by
 emitter (the ceiling-vs-floor comparison between models).
 
+**Backends** (`--backend`): `mock` (synthetic JSON, no model needed), `ollama`
+(local — the default, and the only backend the in-app button uses), and
+`claude`. The `claude` backend is **remote**: it POSTs the prompt (your selected
+node's title plus a short content snippet of each neighbour) to Anthropic's API.
+It is opt-in only — never the in-app default, selected explicitly on the CLI, and
+requires `ANTHROPIC_API_KEY` in the environment (no key is bundled). It exists
+for the phase-2 *ceiling* comparison; per the project's sensitivity rule, point
+it only at benign corpora, never at real or sensitive graph content.
+
 ### Query channel
 
 A second loopback listener — a UDP request/response channel on
@@ -265,11 +276,12 @@ It can also write a synthetic project DB for eyeballing the real app at scale:
 (cd build && ctest --output-on-failure)
 ```
 
-Twenty-five doctest binaries: `forces`, `integrator`, `barnes_hut`,
+Twenty-eight doctest binaries: `forces`, `integrator`, `barnes_hut`,
 `graph_buffer`, `picks`, `cluster`, `ppr`, `timeline`, `wikilinks`,
 `escape_wipe`, `db`, `project_store`, `secure_wipe`, `seed`, `settings`,
 `phantom`, `query_protocol`, `query_responder`, `query_token`, `ask`, `promote`,
-`phantom_lifecycle`, `labels`, `cli`, plus a placeholder sanity check.
+`phantom_lifecycle`, `labels`, `cli`, `session`, `paths`, `rabbit`, plus a
+placeholder sanity check.
 
 Pure-logic modules ship with doctest cases before being threaded into runtime
 code; render-loop and ImGui-bound code is exempt by design (no useful unit-test
@@ -326,18 +338,22 @@ CI runs the build + test matrix across all three on every push; tagged releases
 
 ```
 src/
-├── main.cpp                          # ~500-line render-loop wiring
+├── main.cpp                          # ~520-line render-loop wiring
 ├── app/                              # session state, hotkeys, render-loop glue
 │   ├── session.{h,cpp}               # per-project Session struct + open_project
 │   ├── hotkeys.{h,cpp}               # ESC/H/B/T/L key handlers
 │   ├── pick.{h,cpp}                  # mouse raypick + click-to-pin
+│   ├── pin.{h,cpp}                   # promote a phantom to a static node
 │   ├── promote.{h,cpp}               # pure phantom→StoredNode promotion (tested)
 │   ├── phantom_lifecycle.{h,cpp}     # per-frame spawn/decay diff (tested)
 │   ├── settings.{h,cpp}              # persisted operator settings (tested)
+│   ├── paths.{h,cpp}                 # data-dir + resource path resolution (tested)
+│   ├── clock.h                       # monotonic clock shim (header-only)
 │   ├── ask.{h,cpp}                   # LLM Ask button: TCP probe + popen
 │   ├── query_responder.{h,cpp}       # answer channel reads from the live graph (tested)
 │   └── query_token.{h,cpp}           # per-session 0600 auth token (tested)
 ├── graph/                            # types, thread-safe buffer, pure algos
+│   ├── types.h                       # shared Edge struct (label / kind / certainty)
 │   ├── graph_buffer.{h,cpp}          # mutex-guarded positions handoff
 │   ├── picks.{h,cpp}                 # weakly-connected triple picker
 │   ├── cluster.{h,cpp}               # label-propagation
@@ -391,3 +407,19 @@ scripts/                              # external bridge + analysis
 
 tests/                                # one doctest binary per module
 ```
+
+## License
+
+Copyright (C) 2026 Mohamed Sayed.
+
+zoigraph is free software: you can redistribute it and/or modify it under the
+terms of the **GNU General Public License** as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the full text in [LICENSE](LICENSE).
+
+Third-party dependencies are vendored at build time via FetchContent under their
+own permissive licenses (zlib / MIT / public domain) — see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). Their notices are bundled
+into every release binary.

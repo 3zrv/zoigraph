@@ -2,10 +2,10 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
 
 permissions:
-  contents: write  # needed to create the GitHub Release + attach assets
+  contents: write # needed to create the GitHub Release + attach assets
 
 jobs:
   build:
@@ -76,6 +76,7 @@ jobs:
           if [ "${{ runner.os }}" != "Windows" ]; then
             strip "stage/${{ matrix.asset_name }}/${{ matrix.binary }}" || true
           fi
+          cp LICENSE THIRD_PARTY_LICENSES.md "stage/${{ matrix.asset_name }}/"
 
       - name: archive (tar.gz)
         if: matrix.archive_ext == 'tar.gz'

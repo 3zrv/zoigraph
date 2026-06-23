@@ -10,8 +10,7 @@ Phase 1 structured-output reliability run:
         --db projects/default.db --out phase1_results.json
 
 The mock backend produces synthetic, mostly-valid JSON so the harness can be
-verified end-to-end before installing Ollama. See llm_bridge.md for the full
-plan and stop criteria.
+verified end-to-end before installing Ollama.
 """
 
 import argparse
@@ -292,9 +291,9 @@ class OllamaBackend(Backend):
 
 class ClaudeBackend(Backend):
     """Calls the Anthropic Messages API. This is the phase-2 *ceiling*
-    backend (llm_bridge.md): if the trust gradient holds against the
-    strongest, most articulate output, it really holds. Requires
-    ANTHROPIC_API_KEY in the environment.
+    backend: if the trust gradient holds against the strongest, most
+    articulate output, it really holds. Requires ANTHROPIC_API_KEY in the
+    environment.
 
     JSON enforcement uses the API's structured-output mode
     (output_config.format with a JSON schema) -- the native equivalent
@@ -397,10 +396,10 @@ def make_backend(name: str, model: Optional[str], failure_rate: float,
     if name == "ollama":
         return OllamaBackend(model=model)
     if name == "claude":
-        # Sensitivity rule (llm_bridge.md): the remote backend never sees
-        # real threat-model content -- benign corpora only.
-        print("NOTE: claude is a REMOTE backend -- benign corpora only "
-              "(llm_bridge.md sensitivity rule).", file=sys.stderr)
+        # Sensitivity rule: the remote backend never sees real threat-model
+        # content -- benign corpora only.
+        print("NOTE: claude is a REMOTE backend -- benign corpora only.",
+              file=sys.stderr)
         return ClaudeBackend(model=model)
     raise SystemExit(f"unknown backend: {name}")
 

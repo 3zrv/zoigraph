@@ -96,8 +96,8 @@ public:
                      const std::string& kind,
                      const std::string& certainty);
 
-    // Append-only telemetry log for the phase-2 trust-gradient measurement
-    // (see llm_bridge.md). `kind` is a short tag identifying the event type
+    // Append-only telemetry log for the phase-2 trust-gradient measurement.
+    // `kind` is a short tag identifying the event type
     // ("phantom_spawn", "phantom_pin", "phantom_decay", "node_edit",
     // "bones_throw"). `node_id` is the relevant node id if applicable
     // (-1 otherwise). `payload` is a free-form JSON blob whose schema

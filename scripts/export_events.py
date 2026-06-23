@@ -17,8 +17,6 @@ Usage:
     python3 scripts/export_events.py
     python3 scripts/export_events.py --db projects/default.db --out events.csv
     python3 scripts/export_events.py --db projects/default.db --no-summary --out events.csv
-
-See llm_bridge.md for the full phase-2 plan and stop criteria.
 """
 
 import argparse
